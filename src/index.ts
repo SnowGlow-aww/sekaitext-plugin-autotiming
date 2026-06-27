@@ -13,7 +13,7 @@ export function setup(host: any) {
   })
   host.registerSidebarItem(PLUGIN_ID, {
     id: 'auto-timing:main',
-    label: '自动打轴',
+    label: '自动轴机',
     icon: 'Clapperboard',
     to: '/auto-timing',
     order: 60,

@@ -20,6 +20,17 @@ export const toast = (
   duration?: number,
 ) => host().ui.toast(message, type, duration)
 
+// Native file pickers (reuse the host's Tauri dialog). Resolve to an absolute
+// path or null. Throws outside Tauri (web dev) — callers should catch.
+export const pickFile = (options?: any): Promise<string | null> =>
+  host()
+    .dialog.open(options)
+    .then((r: any) => (typeof r === 'string' ? r : null))
+export const pickSave = (options?: any): Promise<string | null> => host().dialog.save(options)
+
+// Navigate back to the host editor (this plugin renders as a top-level route).
+export const goHome = () => host().router.push('/')
+
 // Core stores.
 export const useStoryStore = () => host().stores.story()
 
