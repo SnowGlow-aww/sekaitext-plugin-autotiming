@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Ensure zip is available
+        run: |
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zip
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin (.sekplugin)
+        run: npm run dist
+
+      - name: List artifacts
+        run: ls -la dist-plugins
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sekplugin
+          path: dist-plugins/*.sekplugin
+          if-no-files-found: error
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: dist-plugins/*.sekplugin
+          token: ${{ secrets.GITHUB_TOKEN }}
+
