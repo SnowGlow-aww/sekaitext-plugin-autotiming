@@ -5,7 +5,9 @@ import { API_BASE, ENCODERS } from '../constants'
 
 // --- engine status ---
 const statusChecked = ref(false)
-const engineAvailable = ref(false)
+const engineAvailable = ref(false) // binary present on disk
+const engineReady = ref(false)     // engine actually usable (gates 开始 buttons)
+const engineError = ref('')        // backend-provided reason when not ready
 const engineVersion = ref('')
 
 // --- timing inputs / state ---
@@ -24,13 +26,14 @@ const previewB64 = ref('')
 const assPath = ref('')
 let timingTimer: any = null
 let previewTimer: any = null
+let timingDoneHandled = false
 
 // --- suppress inputs / state ---
 const sourceVideo = ref('')
 const sourceSubtitle = ref('')
 const outputPath = ref('')
 const encoder = ref('HevcVideoToolbox')
-const crf = ref(21)
+const crf = ref<number | string>(21) // input may yield '' when cleared; keep 0 distinct
 
 const suppressTaskId = ref('')
 const suppressStatus = ref('')
@@ -65,9 +68,13 @@ onMounted(async () => {
   try {
     const s = await api('/engine/status')
     engineAvailable.value = !!s.available
+    engineReady.value = !!s.ready
+    engineError.value = s.error || ''
     engineVersion.value = s.engine ? s.engine.name + ' v' + s.engine.version : ''
-  } catch {
+  } catch (e: any) {
     engineAvailable.value = false
+    engineReady.value = false
+    engineError.value = (e && e.message) || ''
   } finally {
     statusChecked.value = true
   }
@@ -89,7 +96,9 @@ function defaultOutput() {
 // --- 打轴 ---
 async function startTiming() {
   if (!videoPath.value || !scriptPath.value) { toast('请先填写视频和剧本 JSON 路径', 'warn'); return }
-  resetTiming()
+  if (timingRunning.value) return
+  resetTiming()            // also clears any leftover poll timers (see resetTiming)
+  timingStatus.value = 'running' // disable button synchronously before awaiting
   try {
     const r = await post('/engine/timing/start', {
       videoPath: videoPath.value,
@@ -97,14 +106,16 @@ async function startTiming() {
       translatePath: translatePath.value,
     })
     timingTaskId.value = r.taskId
-    timingStatus.value = 'running'
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
   } catch (e: any) {
+    timingStatus.value = '' // re-enable button so the user can retry
     toast('启动打轴失败: ' + e.message, 'error')
   }
 }
 function resetTiming() {
+  stopTimingPolls()
+  timingDoneHandled = false
   timingPercent.value = 0; timingFps.value = 0; timingEta.value = ''
   dialogTotal.value = 0; matched.value = 0; previewB64.value = ''; assPath.value = ''
 }
@@ -136,6 +147,8 @@ async function pollPreview() {
   } catch { /* ignore */ }
 }
 async function onTimingDone() {
+  if (timingDoneHandled) return // guard against overlapping polls firing this twice
+  timingDoneHandled = true
   stopTimingPolls()
   timingPercent.value = 100
   toast('打轴完成,正在导出字幕…', 'success')
@@ -158,24 +171,29 @@ async function cancelTiming() {
 // --- 压制 ---
 async function startSuppress() {
   if (!sourceVideo.value || !outputPath.value) { toast('请填写源视频和输出路径', 'warn'); return }
-  resetSuppress()
+  if (suppressRunning.value) return
+  resetSuppress()              // also clears any leftover poll timer (see resetSuppress)
+  suppressStatus.value = 'running' // disable button synchronously before awaiting
+  // keep CRF 0 (lossless) intact; only fall back to 21 on empty/invalid input
+  const crfVal = crf.value === '' ? 21 : Number(crf.value)
   try {
     const r = await post('/engine/suppress/start', {
       sourceVideo: sourceVideo.value,
       outputPath: outputPath.value,
       sourceSubtitle: sourceSubtitle.value,
-      crf: Number(crf.value) || 21,
+      crf: Number.isNaN(crfVal) ? 21 : crfVal,
       encoder: encoder.value,
       useHwAccelDecode: true,
     })
     suppressTaskId.value = r.taskId
-    suppressStatus.value = 'running'
     suppressTimer = setInterval(pollSuppress, 500)
   } catch (e: any) {
+    suppressStatus.value = '' // re-enable button so the user can retry
     toast('启动压制失败: ' + e.message, 'error')
   }
 }
 function resetSuppress() {
+  stopSuppressPoll()
   suppressPercent.value = 0; suppressFrame.value = 0; suppressTotal.value = 0
   suppressFps.value = 0; suppressLog.value = ''
 }
@@ -207,12 +225,13 @@ async function cancelSuppress() {
   <div class="p-4 max-w-3xl mx-auto space-y-4">
     <div class="flex items-center justify-between">
       <h1 class="text-xl font-bold">自动打轴 + 压制</h1>
-      <span v-if="statusChecked && engineAvailable" class="badge badge-success">引擎就绪 · {{ engineVersion }}</span>
-      <span v-else-if="statusChecked" class="badge badge-error">引擎未安装</span>
+      <span v-if="statusChecked && engineReady" class="badge badge-success">引擎就绪 · {{ engineVersion }}</span>
+      <span v-else-if="statusChecked" class="badge badge-error">{{ engineError || '引擎未安装' }}</span>
     </div>
 
-    <div v-if="statusChecked && !engineAvailable" class="alert alert-warning text-sm">
-      <span>打轴引擎未安装。需把 SekaiToolsEngine 与 libass 版 ffmpeg 随版本打包到后端的 engine/ 目录(见设置页说明)。</span>
+    <div v-if="statusChecked && !engineReady" class="alert alert-warning text-sm">
+      <span v-if="engineError">{{ engineError }}</span>
+      <span v-else>打轴引擎未安装。需把 SekaiToolsEngine 与 libass 版 ffmpeg 随版本打包到后端的 engine/ 目录(见设置页说明)。</span>
     </div>
 
     <!-- ① 打轴 -->
@@ -234,7 +253,7 @@ async function cancelSuppress() {
         </label>
 
         <div class="flex gap-2">
-          <button class="btn btn-primary btn-sm" :disabled="!engineAvailable || timingRunning" @click="startTiming">开始打轴</button>
+          <button class="btn btn-primary btn-sm" :disabled="!engineReady || timingRunning" @click="startTiming">开始打轴</button>
           <button class="btn btn-ghost btn-sm" :disabled="!timingRunning" @click="cancelTiming">取消</button>
         </div>
 
@@ -281,7 +300,7 @@ async function cancelSuppress() {
         </div>
 
         <div class="flex gap-2">
-          <button class="btn btn-primary btn-sm" :disabled="!engineAvailable || suppressRunning" @click="startSuppress">开始压制</button>
+          <button class="btn btn-primary btn-sm" :disabled="!engineReady || suppressRunning" @click="startSuppress">开始压制</button>
           <button class="btn btn-ghost btn-sm" :disabled="!suppressRunning" @click="cancelSuppress">取消</button>
         </div>
 
