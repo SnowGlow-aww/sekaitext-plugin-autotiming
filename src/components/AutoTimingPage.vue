@@ -21,7 +21,12 @@ const timingPercent = ref(0)
 const timingFps = ref(0)
 const timingEta = ref('')
 const dialogTotal = ref(0)
+const bannerTotal = ref(0)
+const markerTotal = ref(0)
 const matched = ref(0)
+const matchedDialog = ref(0)
+const matchedBanner = ref(0)
+const matchedMarker = ref(0)
 const previewB64 = ref('')
 const assPath = ref('')
 let timingTimer: any = null
@@ -117,7 +122,9 @@ function resetTiming() {
   stopTimingPolls()
   timingDoneHandled = false
   timingPercent.value = 0; timingFps.value = 0; timingEta.value = ''
-  dialogTotal.value = 0; matched.value = 0; previewB64.value = ''; assPath.value = ''
+  dialogTotal.value = 0; bannerTotal.value = 0; markerTotal.value = 0
+  matched.value = 0; matchedDialog.value = 0; matchedBanner.value = 0; matchedMarker.value = 0
+  previewB64.value = ''; assPath.value = ''
 }
 function stopTimingPolls() {
   if (timingTimer) clearInterval(timingTimer)
@@ -133,7 +140,12 @@ async function pollTiming() {
     timingFps.value = p.fps || 0
     timingEta.value = p.eta || ''
     dialogTotal.value = p.dialogTotal || 0
+    bannerTotal.value = p.bannerTotal || 0
+    markerTotal.value = p.markerTotal || 0
     matched.value = p.matched || 0
+    matchedDialog.value = p.matchedDialog || 0
+    matchedBanner.value = p.matchedBanner || 0
+    matchedMarker.value = p.matchedMarker || 0
     if (p.status === 'done') onTimingDone()
     else if (p.status === 'error') { stopTimingPolls(); toast('打轴失败: ' + (p.error || ''), 'error') }
     else if (p.status === 'canceled') { stopTimingPolls() }
@@ -260,7 +272,7 @@ async function cancelSuppress() {
         <div v-if="timingStatus">
           <progress class="progress progress-primary w-full" :value="timingPercent" max="100"></progress>
           <div class="text-xs opacity-70 mt-1">
-            {{ timingStatus }} · {{ timingPercent.toFixed(1) }}% · fps {{ timingFps }} · 剩余 {{ timingEta }} · 已匹配 {{ matched }}/{{ dialogTotal }}
+            {{ timingStatus }} · {{ timingPercent.toFixed(1) }}% · fps {{ timingFps }} · 剩余 {{ timingEta }} · 对话 {{ matchedDialog }}/{{ dialogTotal }}<template v-if="bannerTotal"> · banner {{ matchedBanner }}/{{ bannerTotal }}</template><template v-if="markerTotal"> · marker {{ matchedMarker }}/{{ markerTotal }}</template>
           </div>
         </div>
         <img v-if="previewSrc" :src="previewSrc" class="rounded border border-base-300 max-h-72 self-start" />
