@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { toast, pickFile, pickSave, goHome } from '../host'
 import { API_BASE, ENCODERS } from '../constants'
 
@@ -14,6 +14,15 @@ const engineVersion = ref('')
 const videoPath = ref('')
 const scriptPath = ref('')
 const translatePath = ref('')
+
+// Custom .ass output directory. Persisted in localStorage so it survives restarts;
+// empty => backend writes to its default subtitles dir. The .ass is named after the
+// scenario script (event_206_05.json -> event_206_05.ass).
+const ASS_OUTDIR_KEY = 'autotiming:assOutputDir'
+const assOutputDir = ref(localStorage.getItem(ASS_OUTDIR_KEY) || '')
+watch(assOutputDir, (v) => {
+  try { localStorage.setItem(ASS_OUTDIR_KEY, v) } catch { /* ignore */ }
+})
 
 // --- recognition thresholds (可调参数; sent as the engine's threshold object) ---
 const THRESHOLD_DEFAULTS = {
@@ -118,7 +127,17 @@ async function browse(setter: (v: string) => void, filters: any[], opts?: { save
 }
 const VIDEO_FILTER = [{ name: '视频', extensions: ['mp4', 'mov', 'mkv', 'm4v', 'avi', 'ts', 'm2ts', 'webm'] }]
 
-onMounted(async () => {
+// Directory picker for the custom .ass output dir (host Tauri dialog → absolute path).
+async function browseAssDir() {
+  try {
+    const p = await pickFile({ multiple: false, directory: true })
+    if (typeof p === 'string' && p) assOutputDir.value = p
+  } catch {
+    toast('当前环境不支持目录选择，请手动填写路径', 'warn')
+  }
+}
+
+async function refreshEngineStatus() {
   try {
     const s = await api('/engine/status')
     engineAvailable.value = !!s.available
@@ -132,7 +151,8 @@ onMounted(async () => {
   } finally {
     statusChecked.value = true
   }
-})
+}
+onMounted(refreshEngineStatus)
 
 onUnmounted(() => clearAllTimers())
 // The host wraps plugin routes in <keep-alive>, so navigating back to the editor
@@ -140,6 +160,9 @@ onUnmounted(() => clearAllTimers())
 // resume if a run is still in flight when we return.
 onDeactivated(() => clearAllTimers())
 onActivated(() => {
+  // Re-probe engine readiness on return: this page is kept-alive so onMounted won't
+  // re-run; without this a transient first-probe failure left the buttons stuck disabled.
+  refreshEngineStatus()
   if (timingTaskId.value && timingStatus.value === 'running' && !timingTimer) {
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
@@ -190,6 +213,10 @@ function resetTiming() {
   dialogTotal.value = 0; bannerTotal.value = 0; markerTotal.value = 0
   matchedDialog.value = 0; matchedBanner.value = 0; matchedMarker.value = 0
   previewB64.value = ''; assPath.value = ''
+  // Clear suppress carry-over inputs so a new timing run never leaves the 压制 section
+  // pointing at the PREVIOUS video's source/subtitle/output (onTimingDone repopulates
+  // them on a successful export; on failure they stay empty instead of stale).
+  sourceVideo.value = ''; sourceSubtitle.value = ''; outputPath.value = ''
 }
 function stopTimingPolls() {
   if (timingTimer) clearInterval(timingTimer)
@@ -231,7 +258,7 @@ async function onTimingDone() {
   try {
     // Bind export to this finished task so a re-run can't make the backend hand
     // back the wrong/half-built subtitle.
-    const r = await post('/engine/timing/export?task=' + timingTaskId.value)
+    const r = await post('/engine/timing/export?task=' + timingTaskId.value, { outputDir: assOutputDir.value })
     assPath.value = r.assPath
     // auto-fill the suppress section for the one-shot flow
     sourceVideo.value = videoPath.value
@@ -312,8 +339,8 @@ async function cancelSuppress() {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></svg>
         </button>
         <span class="font-bold tracking-tight">自动打轴 + 压制</span>
-        <span v-if="statusChecked && engineReady" class="app-chip bg-success/15 text-success ml-auto">引擎就绪 · {{ engineVersion }}</span>
-        <span v-else-if="statusChecked" class="app-chip bg-error/15 text-error ml-auto">{{ engineError || '引擎未安装' }}</span>
+        <span v-if="statusChecked && engineReady" class="app-chip bg-success/15 text-success ml-auto">内核就绪 · {{ engineVersion }}</span>
+        <span v-else-if="statusChecked" class="app-chip bg-error/15 text-error ml-auto">{{ engineError || '内核未安装' }}</span>
       </div>
     </header>
 
@@ -323,7 +350,7 @@ async function cancelSuppress() {
         class="rounded-[var(--radius-control)] border border-[var(--color-border)] bg-warning/10 text-warning p-3 text-sm"
       >
         <span v-if="engineError">{{ engineError }}</span>
-        <span v-else>打轴引擎未安装。需把 SekaiToolsEngine 与 libass 版 ffmpeg 随版本打包到后端的 engine/ 目录(见设置页说明)。</span>
+        <span v-else>打轴内核未安装。需把 SekaiCoreEngine 与 libass 版 ffmpeg 随版本打包到后端的 engine/ 目录(见设置页说明)。</span>
       </div>
 
       <!-- ① 打轴 -->
@@ -349,6 +376,13 @@ async function cancelSuppress() {
           <div class="flex gap-2 mt-1">
             <input class="app-input flex-1" v-model="translatePath" placeholder="可留空" />
             <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" @click="browse((v) => (translatePath = v), [{ name: '文本', extensions: ['txt'] }])">选择…</button>
+          </div>
+        </label>
+        <label class="block">
+          <span class="app-label">字幕输出目录(可选)</span>
+          <div class="flex gap-2 mt-1">
+            <input class="app-input flex-1" v-model="assOutputDir" placeholder="留空 = 应用数据目录;打轴完成后自动导出为「剧本名.ass」" />
+            <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" @click="browseAssDir">选择…</button>
           </div>
         </label>
 
