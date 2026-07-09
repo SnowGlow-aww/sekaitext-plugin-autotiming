@@ -128,6 +128,29 @@ function onLineUpdated(nl: EngineLine) {
     const d: number[] = syncStatus.value.dirtyLines || []
     if (!d.includes(nl.index)) syncStatus.value.dirtyLines = [...d, nl.index]
   }
+  scheduleAutosave()
+}
+
+// --- 逐行微调即落盘（autosave.ass 保险文件）---
+// 每次分句/译文改动落到引擎后，防抖把当前完整字幕（同导出口径后处理）写到输出
+// 目录的 autosave.ass——后端专用端点，不碰正式导出与 Aegisub 同步基线；崩溃/
+// 误退后打开 autosave.ass 即可拿回全部微调。
+let autosaveTimer: any = null
+function scheduleAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = setTimeout(async () => {
+    autosaveTimer = null
+    if (timingStatus.value !== 'done' || !timingTaskId.value) return
+    try {
+      await post('/engine/timing/autosave?task=' + timingTaskId.value, {
+        outputDir: assOutputDir.value,
+        clean: cleanExport.value,
+        syncTags: exportSyncTags.value,
+        styleTemplate: styleTemplate.value,
+        styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
+      })
+    } catch { /* 保险动作静默失败；老版宿主没有该端点（404）也不打扰 */ }
+  }, 1500)
 }
 
 // --- 导出与 Aegisub 同步 ---
@@ -305,6 +328,7 @@ onActivated(() => {
 function clearAllTimers() {
   for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer]) if (t) clearInterval(t)
   timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = null
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
 }
 
 function defaultOutput() {

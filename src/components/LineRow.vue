@@ -198,6 +198,8 @@ async function saveEdit() {
       {{ displayText }}
     </div>
     <div v-else class="px-3 pb-2 pt-1 space-y-2">
+      <!-- 原文对照：微调译文时随时可见（引擎行数据自带 BodyOriginal） -->
+      <div class="app-help whitespace-pre-wrap" title="原文">{{ line.body }}</div>
       <textarea
         v-model="editText"
         rows="2"
