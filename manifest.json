@@ -1,10 +1,10 @@
 {
   "id": "auto-timing",
   "name": "自动轴机 + 压制",
-  "version": "1.0.6",
-  "description": "在编辑器内对视频自动打轴(识别对话生成时间轴)并压制(烧录字幕导出成片)。",
+  "version": "2.0.0",
+  "description": "在编辑器内自动打轴(双列行列表+分句微调)、与 Aegisub 双向同步、并压制(烧录字幕导出成片)。",
   "author": "雪莹ちゃん",
   "entry": "entry.js",
-  "minHostVersion": "2.0.0",
+  "minHostVersion": "5.2.0",
   "icon": "Clapperboard"
 }
