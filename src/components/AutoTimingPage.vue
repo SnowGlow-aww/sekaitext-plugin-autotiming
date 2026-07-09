@@ -6,6 +6,9 @@ import { toast, pickFile, pickSave, goHome } from '../host'
 import { ENCODERS } from '../constants'
 import { api, post, type EngineLine, type LinesPayload } from '../engine'
 import LineRow from './LineRow.vue'
+// 内置团队样式模板：随插件分发，导出时整段直传后端 —— 开箱即用，无需人手一份文件。
+import BUILTIN_STYLE_TEMPLATE from '../assets/team-style-template.ass?raw'
+const BUILTIN_STYLE_TEMPLATE_NAME = 'pjs剧情轴样式 v3.1.3'
 
 // --- engine status ---
 const statusChecked = ref(false)
@@ -142,6 +145,7 @@ const showExportOpts = ref(false)
 const exporting = ref(false)
 const exportedAss = ref('')
 const syncScriptPath = ref('')
+const aegisubMacroPath = ref('') // 宏被自动装进本机 Aegisub autoload 的路径（空=没装 Aegisub）
 const syncStatus = ref<any>(null)
 const pulling = ref(false)
 let syncTimer: any = null
@@ -158,9 +162,12 @@ async function exportAss() {
       clean: cleanExport.value,
       syncTags: exportSyncTags.value,
       styleTemplate: styleTemplate.value,
+      // 未指定自定义模板时用内置团队模板（路径优先于内容，后端同口径）
+      styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
     })
     exportedAss.value = r.assPath
     syncScriptPath.value = r.syncScript || ''
+    aegisubMacroPath.value = r.aegisubMacro || ''
     for (const wmsg of r.warnings || []) toast(wmsg, 'warn', 7000)
     // 一条龙：自动填充压制段
     if (!sourceVideo.value) sourceVideo.value = videoPath.value
@@ -340,7 +347,7 @@ function resetTiming() {
   matchedDialog.value = 0; matchedBanner.value = 0; matchedMarker.value = 0
   previewB64.value = ''
   lines.value = []; linesFps.value = 0; expandedKey.value = ''
-  exportedAss.value = ''; syncScriptPath.value = ''; syncStatus.value = null
+  exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
   // Clear suppress carry-over inputs so a new timing run never leaves the 压制 section
   // pointing at the PREVIOUS video's source/subtitle/output (export repopulates them;
   // on failure they stay empty instead of stale).
@@ -586,14 +593,14 @@ async function cancelSuppress() {
                 <span class="app-label">写入 Aegisub 同步标识（Effect 字段 st:N，双向同步的键）</span>
               </label>
               <label class="block">
-                <span class="app-label">团队样式模板(可选，含 1行/2行/3行 定义的 .ass)</span>
+                <span class="app-label">团队样式模板（默认用内置 {{ BUILTIN_STYLE_TEMPLATE_NAME }}，选文件可覆盖）</span>
                 <div class="flex gap-2 mt-1">
-                  <input class="app-input flex-1" v-model="styleTemplate" placeholder="留空 = 沿用引擎默认样式定义" />
+                  <input class="app-input flex-1" v-model="styleTemplate" :placeholder="'留空 = 内置模板 ' + BUILTIN_STYLE_TEMPLATE_NAME" />
                   <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" @click="browse((v) => (styleTemplate = v), [{ name: '字幕/样式', extensions: ['ass', 'txt'] }])">选择…</button>
                 </div>
               </label>
               <p class="app-help">
-                导出后在 Aegisub 里精调直接 Ctrl+S 保存即可，轴机会自动回读换行时间；轴机侧再改动后点「推送到 Aegisub」，在 Aegisub 里运行「自动化 → SekaiText → 从轴机拉取」应用。
+                导出后在 Aegisub 里精调直接 Ctrl+S 保存即可，轴机会自动回读换行时间；轴机侧再改动后点「推送到 Aegisub」，在 Aegisub 里运行「自动化 → SekaiText → 从轴机拉取」应用（同步宏会自动装进本机 Aegisub，首次需重启 Aegisub）。
               </p>
             </div>
           </div>
@@ -601,7 +608,8 @@ async function cancelSuppress() {
           <!-- 导出状态条 -->
           <div v-if="exportedAss" class="rounded-[var(--radius-control)] border border-[var(--color-border)] bg-success/10 p-2 text-xs space-y-1">
             <div class="text-success">✓ 已导出: {{ exportedAss }}</div>
-            <div v-if="syncScriptPath" class="app-help">同步宏已生成: {{ syncScriptPath }}（复制进 Aegisub 的 automation/autoload 目录，一次即可）</div>
+            <div v-if="aegisubMacroPath" class="app-help">✓ 同步宏已自动装入 Aegisub（{{ aegisubMacroPath }}，首次使用重启 Aegisub 生效）</div>
+            <div v-else-if="syncScriptPath" class="app-help">未检测到本机 Aegisub。同步宏已生成: {{ syncScriptPath }}（复制进 Aegisub 的 automation/autoload 目录，一次即可）</div>
             <div v-if="pulling" class="app-help">正在回读 Aegisub 改动…</div>
           </div>
 
