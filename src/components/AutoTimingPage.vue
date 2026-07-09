@@ -484,7 +484,7 @@ async function cancelSuppress() {
       </div>
 
       <!-- 双列：左=输入与运行，右=行列表与分句微调 -->
-      <div class="grid gap-4 lg:grid-cols-[380px_minmax(0,1fr)] items-start">
+      <div class="grid gap-4 min-[900px]:grid-cols-[380px_minmax(0,1fr)] lg:grid-cols-[380px_minmax(0,1fr)] items-start">
         <!-- ① 打轴（左列） -->
         <div class="app-card p-5 space-y-3">
           <div class="section-title">① 打轴(识别对话生成时间轴)</div>
