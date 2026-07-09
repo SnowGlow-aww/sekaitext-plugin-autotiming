@@ -562,12 +562,13 @@ async function cancelSuppress() {
             <span v-if="lines.length" class="app-help">共 {{ dialogLines.length }} 句 · 过长 {{ tooLongCount }} 句</span>
             <span class="ml-auto"></span>
             <button
-              v-if="exportedAss && dirtyCount > 0"
+              v-if="exportedAss"
               class="btn btn-sm btn-ghost border border-[var(--color-border)]"
-              title="把轴机侧的改动写成同步文件，在 Aegisub 里热键拉取"
+              :disabled="dirtyCount === 0"
+              :title="dirtyCount > 0 ? '把轴机侧的改动写成同步文件，在 Aegisub 里热键拉取' : '轴机侧暂无未推送的改动'"
               @click="pushToAegisub"
             >
-              推送到 Aegisub ({{ dirtyCount }})
+              推送到 Aegisub{{ dirtyCount > 0 ? ` (${dirtyCount})` : '' }}
             </button>
             <button
               class="btn btn-sm btn-brand"
@@ -590,7 +591,7 @@ async function cancelSuppress() {
               </label>
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="checkbox checkbox-sm" v-model="exportSyncTags" />
-                <span class="app-label">写入 Aegisub 同步标识（Effect 字段 st:N，双向同步的键）</span>
+                <span class="app-label">写入 Aegisub 同步标识（在每行 Effect 字段埋 st:行号 作为对应标记，双向同步必需）</span>
               </label>
               <label class="block">
                 <span class="app-label">团队样式模板（默认用内置 {{ BUILTIN_STYLE_TEMPLATE_NAME }}，选文件可覆盖）</span>
