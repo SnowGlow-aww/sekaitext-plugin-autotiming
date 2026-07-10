@@ -1,10 +1,10 @@
 {
   "id": "auto-timing",
   "name": "自动轴机 + 压制",
-  "version": "2.1.0",
-  "description": "在编辑器内自动打轴(双列行列表+分句微调)、与 Aegisub 双向同步、并压制(烧录字幕导出成片)。",
+  "version": "2.2.0",
+  "description": "在编辑器内自动打轴(双列行列表+分句微调)、与 Aegisub 双向同步(译文+换行时间)、压制成片；支持多视频并行任务。",
   "author": "雪莹ちゃん",
   "entry": "entry.js",
-  "minHostVersion": "5.2.0",
+  "minHostVersion": "5.5.0",
   "icon": "Clapperboard"
 }

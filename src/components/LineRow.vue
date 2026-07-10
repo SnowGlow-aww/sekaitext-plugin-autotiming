@@ -123,6 +123,36 @@ function applySuggest() {
   commitSeparator()
 }
 
+// --- 语音停顿候选：拉取该句语音做静音检测，把换行对齐到说话人实际停顿 ---
+// （人声台词的分句习惯按语音节奏；无语音的虚拟歌手台词走「按字数均分」）
+const voicePauses = ref<{ frame: number; timeSec: number }[] | null>(null)
+const voiceState = ref<'idle' | 'loading' | 'novoice' | 'error'>('idle')
+const voiceErrMsg = ref('')
+async function fetchVoicePauses() {
+  if (voiceState.value === 'loading') return
+  voiceState.value = 'loading'
+  voiceErrMsg.value = ''
+  try {
+    const r = await post('/engine/timing/line/voicepauses?task=' + props.taskId, { index: props.line.index })
+    if (r.noVoice) { voiceState.value = 'novoice'; voicePauses.value = null; return }
+    voicePauses.value = (r.pauses || []).map((p: any) => ({ frame: p.frame, timeSec: p.timeSec }))
+    if (voicePauses.value!.length) {
+      voiceState.value = 'idle'
+    } else {
+      voiceState.value = 'error'
+      voiceErrMsg.value = '这段语音没有明显停顿'
+    }
+  } catch (e: any) {
+    voiceState.value = 'error'
+    voiceErrMsg.value = e && e.status === 404 ? '需要 SekaiText ≥ 5.5.0' : (e?.message || '获取失败')
+    voicePauses.value = null
+  }
+}
+function applyPause(f: number) {
+  sf.value = clampSf(f)
+  commitSeparator()
+}
+
 // --- 换行帧画面预览（展开时跟随 sf，防抖取帧） ---
 const thumbB64 = ref('')
 let thumbTimer: any = null
@@ -290,7 +320,31 @@ async function saveEdit() {
             >
               按字数均分
             </button>
+            <button
+              class="btn btn-xs btn-ghost border border-[var(--color-border)]"
+              :disabled="voiceState === 'loading'"
+              title="拉取该句语音做静音检测，把换行对齐到说话人实际的停顿处"
+              @click="fetchVoicePauses"
+            >
+              {{ voiceState === 'loading' ? '语音分析中…' : '语音停顿' }}
+            </button>
           </div>
+          <div v-if="voicePauses && voicePauses.length" class="flex flex-wrap items-center gap-1 mt-1">
+            <span class="app-help">停顿点（点击应用）:</span>
+            <button
+              v-for="p in voicePauses"
+              :key="p.frame"
+              class="btn btn-xs btn-ghost border border-[var(--color-border)] tabular-nums"
+              :title="'语音 ' + p.timeSec.toFixed(2) + 's 处停顿 → 帧 ' + p.frame"
+              @click="applyPause(p.frame)"
+            >
+              {{ p.frame }}
+            </button>
+          </div>
+          <div v-else-if="voiceState === 'novoice'" class="app-help mt-1">
+            该行无语音（虚拟歌手台词）——按观众读完为准，用「按字数均分」或打字速度建议。
+          </div>
+          <div v-else-if="voiceState === 'error'" class="text-warning text-xs mt-1">语音停顿: {{ voiceErrMsg }}</div>
           <div v-if="warn1 || warn2" class="text-warning text-xs mt-1">
             <span v-if="warn1">第一行文字可能来不及打完；</span>
             <span v-if="warn2">第二行文字可能来不及打完；</span>

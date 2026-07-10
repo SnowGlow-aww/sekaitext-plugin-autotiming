@@ -68,6 +68,134 @@ const THRESHOLD_FIELDS: { key: keyof typeof THRESHOLD_DEFAULTS; label: string; m
   { key: 'dialogDropGraceSeconds', label: '掉帧宽限(秒)', max: 3, step: 0.1 },
 ]
 
+// --- 并行任务模式（宿主 ≥5.5.0：每个任务独占一个引擎进程，可同时打轴/压制多个视频） ---
+const PARALLEL_KEY = 'autotiming:parallel'
+const parallelEnabled = ref(localStorage.getItem(PARALLEL_KEY) === '1')
+watch(parallelEnabled, (v) => { try { localStorage.setItem(PARALLEL_KEY, v ? '1' : '0') } catch { /* ignore */ } })
+const hostNoTasks = ref(false) // /engine/tasks 404：宿主还没升到 5.5.0，隐藏并行 UI
+
+type TaskSnap = {
+  taskId: string; status: string; percent: number; error?: string
+  videoPath?: string; scriptPath?: string; exportAssPath?: string
+  matchedDialog?: number; dialogTotal?: number
+  sourceVideo?: string; outputPath?: string
+}
+const timingTasks = ref<TaskSnap[]>([])
+const suppressTasks = ref<TaskSnap[]>([])
+let tasksTimer: any = null
+let tasksAdopted = false // 首次快照时把后端仍存活的任务找回（插件重载/页面重建后）
+
+function baseName(p?: string) {
+  return (p || '').split(/[\\/]/).pop() || ''
+}
+function taskStatusLabel(t: TaskSnap) {
+  if (t.status === 'running') return (t.percent || 0).toFixed(0) + '%'
+  if (t.status === 'done') return '完成'
+  if (t.status === 'error') return '失败'
+  if (t.status === 'canceled') return '已取消'
+  return t.status
+}
+async function pollTasks() {
+  try {
+    const r = await api('/engine/tasks')
+    timingTasks.value = r.timing || []
+    suppressTasks.value = r.suppress || []
+    hostNoTasks.value = false
+    if (!tasksAdopted) {
+      tasksAdopted = true
+      // 找回后端仍存活的任务：打轴恢复最近一个；压制只恢复还在跑的
+      if (!timingTaskId.value && timingTasks.value.length) {
+        void activateTimingTask(timingTasks.value[timingTasks.value.length - 1].taskId)
+      }
+      if (!suppressTaskId.value) {
+        const running = suppressTasks.value.filter((t) => t.status === 'running')
+        if (running.length) void activateSuppressTask(running[running.length - 1].taskId)
+      }
+    }
+  } catch (e: any) {
+    if (e && e.status === 404) {
+      hostNoTasks.value = true
+      if (tasksTimer) { clearInterval(tasksTimer); tasksTimer = null }
+    }
+  }
+}
+function startTasksPoll() {
+  if (tasksTimer || hostNoTasks.value) return
+  tasksTimer = setInterval(pollTasks, 2000)
+  void pollTasks()
+}
+async function cancelTask(id: string) {
+  try { await post('/engine/cancel?domain=timing&task=' + id) } catch { /* ignore */ }
+  void pollTasks()
+}
+async function closeTask(id: string) {
+  try { await post('/engine/timing/close?task=' + id) } catch { /* ignore */ }
+  if (id === timingTaskId.value) {
+    // 关闭的是当前查看的任务：清空右列详情
+    stopTimingPolls()
+    if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
+    timingTaskId.value = ''
+    timingStatus.value = ''
+    lines.value = []; linesFps.value = 0; expandedKey.value = ''; previewB64.value = ''
+    exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
+  }
+  void pollTasks()
+}
+// 切换「当前查看」的打轴任务：右列行列表/导出/同步全部跟着走。
+// 直接读 /progress 填充状态（不走 pollTiming，免得切到终态任务时误弹完成/失败 toast）。
+async function activateTimingTask(id: string) {
+  if (!id || timingTaskId.value === id) return
+  stopTimingPolls()
+  if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
+  const snap = timingTasks.value.find((t) => t.taskId === id)
+  timingDoneHandled = !!snap && snap.status !== 'running' // 终态任务不再补完成 toast
+  timingTaskId.value = id
+  timingPercent.value = 0; previewB64.value = ''
+  lines.value = []; linesFps.value = 0; expandedKey.value = ''
+  exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
+  const p = await api('/engine/timing/progress?task=' + id).catch(() => null)
+  if (!p) { timingStatus.value = snap?.status || ''; return }
+  timingStatus.value = p.status
+  timingPercent.value = p.percent || 0
+  timingFps.value = p.fps || 0; timingEta.value = p.eta || ''
+  dialogTotal.value = p.dialogTotal || 0; bannerTotal.value = p.bannerTotal || 0; markerTotal.value = p.markerTotal || 0
+  matchedDialog.value = p.matchedDialog || 0; matchedBanner.value = p.matchedBanner || 0; matchedMarker.value = p.matchedMarker || 0
+  if (p.status === 'running') {
+    timingDoneHandled = false
+    timingTimer = setInterval(pollTiming, 500)
+    previewTimer = setInterval(pollPreview, 500)
+    if (!hostTooOld.value) linesTimer = setInterval(loadLines, 2000)
+  } else if (p.status === 'done') {
+    await loadLines()
+    // 恢复导出/同步状态（导出过的任务重新挂上自动回读）
+    try {
+      const s = await api('/engine/timing/sync/status?task=' + id)
+      if (s.exported) {
+        exportedAss.value = s.assPath
+        syncStatus.value = s
+        if (!sourceVideo.value) sourceVideo.value = snap?.videoPath || ''
+        if (!sourceSubtitle.value) sourceSubtitle.value = s.assPath
+        startSyncPoll()
+      }
+    } catch { /* 老宿主/暂态失败：忽略 */ }
+  }
+}
+async function activateSuppressTask(id: string) {
+  if (!id || suppressTaskId.value === id) return
+  resetSuppress()
+  suppressTaskId.value = id
+  const snap = suppressTasks.value.find((t) => t.taskId === id)
+  if (snap && snap.status !== 'running') {
+    // 终态任务：直接用快照填充，不走 pollSuppress（免得误弹完成/失败 toast）
+    suppressStatus.value = snap.status
+    suppressPercent.value = snap.percent || 0
+    suppressLog.value = snap.error || ''
+    return
+  }
+  await pollSuppress()
+  if (suppressStatus.value === 'running') suppressTimer = setInterval(pollSuppress, 500)
+}
+
 const timingTaskId = ref('')
 const timingStatus = ref('') // '' | running | done | error | canceled
 const timingPercent = ref(0)
@@ -157,13 +285,44 @@ function scheduleAutosave() {
 const CLEAN_KEY = 'autotiming:cleanExport'
 const SYNC_KEY = 'autotiming:syncTags'
 const TMPL_KEY = 'autotiming:styleTemplate'
+const AEGISUB_DIR_KEY = 'autotiming:aegisubDir'
 const cleanExport = ref(localStorage.getItem(CLEAN_KEY) !== '0')
 const exportSyncTags = ref(localStorage.getItem(SYNC_KEY) !== '0')
 const styleTemplate = ref(localStorage.getItem(TMPL_KEY) || '')
+// Aegisub automation/autoload 目录：便携版/自定义安装位置自动探测不到，手动指一次
+const aegisubDir = ref(localStorage.getItem(AEGISUB_DIR_KEY) || '')
 watch(cleanExport, (v) => { try { localStorage.setItem(CLEAN_KEY, v ? '1' : '0') } catch { /* ignore */ } })
 watch(exportSyncTags, (v) => { try { localStorage.setItem(SYNC_KEY, v ? '1' : '0') } catch { /* ignore */ } })
 watch(styleTemplate, (v) => { try { localStorage.setItem(TMPL_KEY, v) } catch { /* ignore */ } })
+watch(aegisubDir, (v) => { try { localStorage.setItem(AEGISUB_DIR_KEY, v) } catch { /* ignore */ } })
 const showExportOpts = ref(false)
+
+async function browseAegisubDir() {
+  try {
+    const p = await pickFile({ multiple: false, directory: true })
+    if (typeof p === 'string' && p) aegisubDir.value = p
+  } catch {
+    toast('当前环境不支持目录选择，请手动填写路径', 'warn')
+  }
+}
+const installingMacro = ref(false)
+async function installAegisubMacro() {
+  if (installingMacro.value) return
+  installingMacro.value = true
+  try {
+    const r = await post('/engine/aegisub/install', { dir: aegisubDir.value })
+    aegisubMacroPath.value = r.installed
+    toast('同步宏已安装: ' + r.installed + '（重启 Aegisub 生效）', 'success', 7000)
+  } catch (e: any) {
+    if (e && e.status === 404 && !e.message?.includes('Aegisub')) {
+      toast('手动安装同步宏需要 SekaiText ≥ 5.5.0，请先升级主程序', 'warn')
+    } else {
+      toast('安装同步宏失败: ' + e.message, 'error')
+    }
+  } finally {
+    installingMacro.value = false
+  }
+}
 
 const exporting = ref(false)
 const exportedAss = ref('')
@@ -187,6 +346,7 @@ async function exportAss() {
       styleTemplate: styleTemplate.value,
       // 未指定自定义模板时用内置团队模板（路径优先于内容，后端同口径）
       styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
+      aegisubDir: aegisubDir.value, // 用户指定的 autoload 目录（便携版探测不到时）
     })
     exportedAss.value = r.assPath
     syncScriptPath.value = r.syncScript || ''
@@ -224,9 +384,17 @@ async function pullFromAegisub(silent = false) {
   pulling.value = true
   try {
     const r = await post('/engine/timing/sync/pull?task=' + timingTaskId.value)
-    if (r.applied > 0) {
+    const text = r.textApplied || 0
+    if (r.applied > 0 || text > 0) {
       await loadLines()
-      if (!silent) toast(`已从 Aegisub 回读 ${r.applied} 处换行时间`, 'success')
+      if (!silent) {
+        const parts = []
+        if (text > 0) parts.push(`${text} 处译文`)
+        if (r.applied > 0) parts.push(`${r.applied} 处换行时间`)
+        toast('已从 Aegisub 回读 ' + parts.join('、'), 'success')
+      }
+    } else if (!silent) {
+      toast('已检查 Aegisub 文件，没有需要回读的改动', 'info')
     }
     if (syncStatus.value) syncStatus.value.changedOnDisk = false
   } catch (e: any) {
@@ -304,7 +472,10 @@ async function refreshEngineStatus() {
     statusChecked.value = true
   }
 }
-onMounted(refreshEngineStatus)
+onMounted(() => {
+  refreshEngineStatus()
+  startTasksPoll() // 任务快照：并行任务列表 + 页面重建后找回后端仍存活的任务
+})
 
 onUnmounted(() => clearAllTimers())
 // The host wraps plugin routes in <keep-alive>, so navigating back to the editor
@@ -315,6 +486,7 @@ onActivated(() => {
   // Re-probe engine readiness on return: this page is kept-alive so onMounted won't
   // re-run; without this a transient first-probe failure left the buttons stuck disabled.
   refreshEngineStatus()
+  startTasksPoll()
   if (timingTaskId.value && timingStatus.value === 'running' && !timingTimer) {
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
@@ -326,8 +498,8 @@ onActivated(() => {
   }
 })
 function clearAllTimers() {
-  for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer]) if (t) clearInterval(t)
-  timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = null
+  for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer, tasksTimer]) if (t) clearInterval(t)
+  timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = tasksTimer = null
   if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
 }
 
@@ -341,8 +513,9 @@ function defaultOutput() {
 // --- 打轴 ---
 async function startTiming() {
   if (!videoPath.value || !scriptPath.value) { toast('请先填写视频和剧本 JSON 路径', 'warn'); return }
-  if (timingRunning.value) return
-  resetTiming()            // also clears any leftover poll timers (see resetTiming)
+  const parallel = parallelEnabled.value && !hostNoTasks.value
+  if (timingRunning.value && !parallel) return
+  resetTiming(parallel)    // also clears any leftover poll timers (see resetTiming)
   timingStatus.value = 'running' // disable button synchronously before awaiting
   try {
     const r = await post('/engine/timing/start', {
@@ -352,17 +525,19 @@ async function startTiming() {
       // Always a full object of finite numbers so the engine's threshold parser
       // never sees a scalar or an empty-string (cleared field) value.
       threshold: thresholdPayload(),
+      parallel,
     })
     timingTaskId.value = r.taskId
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
     linesTimer = setInterval(loadLines, 2000)
+    void pollTasks()
   } catch (e: any) {
     timingStatus.value = '' // re-enable button so the user can retry
     toast('启动打轴失败: ' + e.message, 'error')
   }
 }
-function resetTiming() {
+function resetTiming(keepSuppressInputs = false) {
   stopTimingPolls()
   if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
   timingDoneHandled = false
@@ -374,8 +549,11 @@ function resetTiming() {
   exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
   // Clear suppress carry-over inputs so a new timing run never leaves the 压制 section
   // pointing at the PREVIOUS video's source/subtitle/output (export repopulates them;
-  // on failure they stay empty instead of stale).
-  sourceVideo.value = ''; sourceSubtitle.value = ''; outputPath.value = ''
+  // on failure they stay empty instead of stale). 并行模式不清：老任务导出的字幕
+  // 正在/等着压制是常态，不能被新打轴顺手抹掉。
+  if (!keepSuppressInputs) {
+    sourceVideo.value = ''; sourceSubtitle.value = ''; outputPath.value = ''
+  }
 }
 function stopTimingPolls() {
   if (timingTimer) clearInterval(timingTimer)
@@ -418,13 +596,16 @@ async function onTimingDone() {
   toast('打轴完成——右侧可逐行微调分句，确认后点「导出 ass」', 'success', 6000)
 }
 async function cancelTiming() {
-  try { await post('/engine/cancel?domain=timing') } catch { /* ignore */ }
+  // 带 task 精确取消当前查看的任务（并行模式必需；老宿主忽略该参数，行为不变）
+  const q = timingTaskId.value ? '&task=' + timingTaskId.value : ''
+  try { await post('/engine/cancel?domain=timing' + q) } catch { /* ignore */ }
 }
 
 // --- 压制 ---
 async function startSuppress() {
   if (!sourceVideo.value || !outputPath.value) { toast('请填写源视频和输出路径', 'warn'); return }
-  if (suppressRunning.value) return
+  const parallel = parallelEnabled.value && !hostNoTasks.value
+  if (suppressRunning.value && !parallel) return
   resetSuppress()              // also clears any leftover poll timer (see resetSuppress)
   suppressStatus.value = 'running' // disable button synchronously before awaiting
   // keep CRF 0 (lossless) intact; only fall back to 21 on empty/invalid input
@@ -437,9 +618,11 @@ async function startSuppress() {
       crf: Number.isNaN(crfVal) ? 21 : crfVal,
       encoder: encoder.value,
       useHwAccelDecode: useHwAccelDecode.value,
+      parallel,
     })
     suppressTaskId.value = r.taskId
     suppressTimer = setInterval(pollSuppress, 500)
+    void pollTasks()
   } catch (e: any) {
     suppressStatus.value = '' // re-enable button so the user can retry
     toast('启动压制失败: ' + e.message, 'error')
@@ -470,7 +653,12 @@ function stopSuppressPoll() {
   suppressTimer = null
 }
 async function cancelSuppress() {
-  try { await post('/engine/cancel?domain=suppress') } catch { /* ignore */ }
+  const q = suppressTaskId.value ? '&task=' + suppressTaskId.value : ''
+  try { await post('/engine/cancel?domain=suppress' + q) } catch { /* ignore */ }
+}
+async function cancelSuppressTask(id: string) {
+  try { await post('/engine/cancel?domain=suppress&task=' + id) } catch { /* ignore */ }
+  void pollTasks()
 }
 </script>
 
@@ -561,9 +749,37 @@ async function cancelSuppress() {
             </div>
           </div>
 
+          <!-- 并行任务模式：可同时打轴/压制多个视频（宿主 ≥5.5.0） -->
+          <div v-if="!hostNoTasks">
+            <label class="flex items-center gap-2 cursor-pointer w-fit">
+              <input type="checkbox" class="toggle toggle-sm" v-model="parallelEnabled" />
+              <span class="app-label">并行任务模式（同时打轴/压制多个视频）</span>
+            </label>
+            <p v-if="parallelEnabled" class="app-help text-warning mt-1">
+              ⚠ 每个并行任务独占一个识别/编码内核进程，CPU 与内存开销成倍增长——性能不高的电脑慎用；完成的任务请及时点 ✕ 关闭以释放内存（同类任务最多并行 4 个）。
+            </p>
+          </div>
+
           <div class="flex gap-2">
-            <button class="btn btn-sm btn-brand" :disabled="!engineReady || timingRunning" @click="startTiming">开始打轴</button>
+            <button class="btn btn-sm btn-brand" :disabled="!engineReady || (timingRunning && !(parallelEnabled && !hostNoTasks))" @click="startTiming">开始打轴</button>
             <button class="btn btn-sm btn-ghost border border-[var(--color-border)]" :disabled="!timingRunning" @click="cancelTiming">取消</button>
+          </div>
+
+          <!-- 任务列表：并行模式或后端还挂着多个任务时显示，点击切换右列查看的任务 -->
+          <div v-if="timingTasks.length && (parallelEnabled || timingTasks.length > 1)" class="space-y-1">
+            <div
+              v-for="t in timingTasks"
+              :key="t.taskId"
+              class="flex items-center gap-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-2 text-xs cursor-pointer hover:bg-[var(--color-surface)]"
+              :style="t.taskId === timingTaskId ? { borderColor: 'var(--color-primary)', background: 'color-mix(in oklch, var(--color-primary) 8%, transparent)' } : {}"
+              :title="t.videoPath"
+              @click="activateTimingTask(t.taskId)"
+            >
+              <span class="truncate flex-1">{{ baseName(t.videoPath) || t.taskId }}</span>
+              <span class="app-help shrink-0">{{ taskStatusLabel(t) }}<template v-if="t.dialogTotal"> · {{ t.matchedDialog }}/{{ t.dialogTotal }}</template></span>
+              <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelTask(t.taskId)">取消</button>
+              <button class="btn btn-xs btn-ghost shrink-0" title="关闭任务并释放其内核进程" @click.stop="closeTask(t.taskId)">✕</button>
+            </div>
           </div>
 
           <div v-if="timingStatus">
@@ -585,6 +801,15 @@ async function cancelSuppress() {
             </label>
             <span v-if="lines.length" class="app-help">共 {{ dialogLines.length }} 句 · 过长 {{ tooLongCount }} 句</span>
             <span class="ml-auto"></span>
+            <button
+              v-if="exportedAss"
+              class="btn btn-sm btn-ghost border border-[var(--color-border)]"
+              :disabled="pulling"
+              title="立即回读 Aegisub 里保存的译文与换行时间（保存后也会自动回读）"
+              @click="pullFromAegisub(false)"
+            >
+              {{ pulling ? '拉取中…' : '从 Aegisub 拉取' }}
+            </button>
             <button
               v-if="exportedAss"
               class="btn btn-sm btn-ghost border border-[var(--color-border)]"
@@ -611,7 +836,7 @@ async function cancelSuppress() {
             <div v-if="showExportOpts" class="mt-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-3 space-y-2">
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="checkbox checkbox-sm" v-model="cleanExport" />
-                <span class="app-label">成品清理（原 tools.lua：样式改 1行/2行/3行、去 \N、删角色名与调试行）</span>
+                <span class="app-label">成品清理（样式按分行数改 1行/2行/3行、删角色名与调试行；\N 保留）</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="checkbox checkbox-sm" v-model="exportSyncTags" />
@@ -624,8 +849,16 @@ async function cancelSuppress() {
                   <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" @click="browse((v) => (styleTemplate = v), [{ name: '字幕/样式', extensions: ['ass', 'txt'] }])">选择…</button>
                 </div>
               </label>
+              <label class="block">
+                <span class="app-label">Aegisub 自动化目录（automation/autoload；便携版探测不到时手动指定）</span>
+                <div class="flex gap-2 mt-1">
+                  <input class="app-input flex-1" v-model="aegisubDir" placeholder="留空 = 自动探测本机 Aegisub" />
+                  <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" @click="browseAegisubDir">选择…</button>
+                  <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" :disabled="installingMacro" title="立即把同步宏装进上面的目录（留空则自动探测）" @click="installAegisubMacro">{{ installingMacro ? '安装中…' : '安装宏' }}</button>
+                </div>
+              </label>
               <p class="app-help">
-                导出后在 Aegisub 里精调直接 Ctrl+S 保存即可，轴机会自动回读换行时间；轴机侧再改动后点「推送到 Aegisub」，在 Aegisub 里运行「自动化 → SekaiText → 从轴机拉取」应用（同步宏会自动装进本机 Aegisub，首次需重启 Aegisub）。
+                导出后在 Aegisub 里精调直接 Ctrl+S 保存即可，轴机会自动回读译文与换行时间（也可点「从 Aegisub 拉取」手动回读）；轴机侧再改动后点「推送到 Aegisub」，在 Aegisub 里运行「自动化 → SekaiText → 从轴机拉取」应用（同步宏随导出自动安装，装不上就在上面指定目录后点「安装宏」，首次需重启 Aegisub）。
               </p>
             </div>
           </div>
@@ -704,8 +937,24 @@ async function cancelSuppress() {
         </label>
 
         <div class="flex gap-2">
-          <button class="btn btn-sm btn-brand" :disabled="!engineReady || suppressRunning" @click="startSuppress">开始压制</button>
+          <button class="btn btn-sm btn-brand" :disabled="!engineReady || (suppressRunning && !(parallelEnabled && !hostNoTasks))" @click="startSuppress">开始压制</button>
           <button class="btn btn-sm btn-ghost border border-[var(--color-border)]" :disabled="!suppressRunning" @click="cancelSuppress">取消</button>
+        </div>
+
+        <!-- 压制任务列表（并行模式）：点击切换查看的任务 -->
+        <div v-if="suppressTasks.length && (parallelEnabled || suppressTasks.length > 1)" class="space-y-1">
+          <div
+            v-for="t in suppressTasks"
+            :key="t.taskId"
+            class="flex items-center gap-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-2 text-xs cursor-pointer hover:bg-[var(--color-surface)]"
+            :style="t.taskId === suppressTaskId ? { borderColor: 'var(--color-primary)', background: 'color-mix(in oklch, var(--color-primary) 8%, transparent)' } : {}"
+            :title="t.outputPath"
+            @click="activateSuppressTask(t.taskId)"
+          >
+            <span class="truncate flex-1">{{ baseName(t.outputPath) || baseName(t.sourceVideo) || t.taskId }}</span>
+            <span class="app-help shrink-0">{{ taskStatusLabel(t) }}</span>
+            <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
+          </div>
         </div>
 
         <div v-if="suppressStatus">
