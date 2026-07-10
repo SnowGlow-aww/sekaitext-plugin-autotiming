@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 双列布局：左列=输入与运行控制（对照 Avalonia 独立版），右列=行列表与分句微调；
 // 压制保持在下方整宽（下滑可见）。导出内建 tools.lua 清理 + Aegisub 双向同步。
-import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
+import { ref, shallowRef, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { toast, pickFile, pickSave, goHome } from '../host'
 import { ENCODERS } from '../constants'
 import { api, post, type EngineLine, type LinesPayload } from '../engine'
@@ -297,6 +297,69 @@ watch(styleTemplate, (v) => { try { localStorage.setItem(TMPL_KEY, v) } catch { 
 watch(aegisubDir, (v) => { try { localStorage.setItem(AEGISUB_DIR_KEY, v) } catch { /* ignore */ } })
 const showExportOpts = ref(false)
 
+// --- staff 制作人员行（随导出注入 ass 顶部；职位固定，ID 可自定义） ---
+const STAFF_KEY = 'autotiming:staffInfo'
+interface StaffInfo {
+  group: string; episode: string; title: string; recorder: string
+  translator: string; proofread: string; timer: string; suppressor: string
+}
+function loadStaff(): StaffInfo {
+  const base: StaffInfo = { group: '', episode: '', title: '', recorder: '', translator: '', proofread: '', timer: '', suppressor: '' }
+  try { return { ...base, ...JSON.parse(localStorage.getItem(STAFF_KEY) || '{}') } } catch { return base }
+}
+const staff = ref<StaffInfo>(loadStaff())
+watch(staff, (v) => { try { localStorage.setItem(STAFF_KEY, JSON.stringify(v)) } catch { /* ignore */ } }, { deep: true })
+const staffFilled = computed(() => Object.values(staff.value).some((v) => v.trim() !== ''))
+// 话数/标题是每集都变的字段，其余（组名/成员）跨集复用——staffPayload 只在有内容时携带
+const staffPayload = computed(() => (staffFilled.value ? { ...staff.value } : null))
+
+// --- 命名预设（识别阈值 / staff 各一组，本地持久化） ---
+interface Preset<T> { name: string; data: T }
+function loadPresetList<T>(key: string): Preset<T>[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '[]')
+    return Array.isArray(v) ? v.filter((p) => p && typeof p.name === 'string' && p.data) : []
+  } catch { return [] }
+}
+function usePresets<T extends object>(key: string, snapshot: () => T, apply: (data: T) => void) {
+  // shallowRef：泛型 T 会被 ref 的深层 UnwrapRef 搅乱类型，列表只做整体替换用浅响应即可
+  const list = shallowRef<Preset<T>[]>(loadPresetList<T>(key))
+  const sel = ref('')
+  const nameInput = ref('')
+  function persist() { try { localStorage.setItem(key, JSON.stringify(list.value)) } catch { /* ignore */ } }
+  function save() {
+    // 未填新名字时覆盖当前选中的预设
+    const name = nameInput.value.trim() || sel.value
+    if (!name) { toast('先给预设起个名字', 'warn'); return }
+    list.value = [...list.value.filter((p) => p.name !== name), { name, data: snapshot() }]
+    persist()
+    sel.value = name
+    nameInput.value = ''
+    toast(`预设「${name}」已保存`, 'success')
+  }
+  function applySel() {
+    const p = list.value.find((x) => x.name === sel.value)
+    if (p) apply(p.data)
+  }
+  function remove() {
+    if (!sel.value) return
+    list.value = list.value.filter((p) => p.name !== sel.value)
+    persist()
+    sel.value = ''
+  }
+  return { list, sel, nameInput, save, applySel, remove }
+}
+const thPresets = usePresets<typeof THRESHOLD_DEFAULTS>(
+  'autotiming:thresholdPresets',
+  () => ({ ...thresholdPayload() }) as typeof THRESHOLD_DEFAULTS,
+  (d) => { threshold.value = { ...THRESHOLD_DEFAULTS, ...d } },
+)
+const stPresets = usePresets<StaffInfo>(
+  'autotiming:staffPresets',
+  () => ({ ...staff.value }),
+  (d) => { staff.value = { ...staff.value, ...d } },
+)
+
 async function browseAegisubDir() {
   try {
     const p = await pickFile({ multiple: false, directory: true })
@@ -347,6 +410,7 @@ async function exportAss() {
       // 未指定自定义模板时用内置团队模板（路径优先于内容，后端同口径）
       styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
       aegisubDir: aegisubDir.value, // 用户指定的 autoload 目录（便携版探测不到时）
+      staff: staffPayload.value, // staff 制作人员行；全空则不注入
     })
     exportedAss.value = r.assPath
     syncScriptPath.value = r.syncScript || ''
@@ -746,6 +810,16 @@ async function cancelSuppressTask(id: string) {
                 <span class="app-help">数值越高越严格(更少误匹配、更易漏轴);掉帧宽限单位为秒。</span>
                 <button class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click="resetThreshold">恢复默认</button>
               </div>
+              <div class="flex items-center gap-2 flex-wrap pt-1 border-t border-[var(--color-border)]">
+                <span class="app-help shrink-0">预设</span>
+                <select class="app-input w-36" v-model="thPresets.sel.value" @change="thPresets.applySel()">
+                  <option value="">— 选择预设 —</option>
+                  <option v-for="p in thPresets.list.value" :key="p.name" :value="p.name">{{ p.name }}</option>
+                </select>
+                <input class="app-input w-36" v-model="thPresets.nameInput.value" placeholder="新预设名" />
+                <button class="btn btn-xs btn-ghost border border-[var(--color-border)]" @click="thPresets.save()">保存预设</button>
+                <button class="btn btn-xs btn-ghost border border-[var(--color-border)]" :disabled="!thPresets.sel.value" @click="thPresets.remove()">删除</button>
+              </div>
             </div>
           </div>
 
@@ -857,6 +931,29 @@ async function cancelSuppressTask(id: string) {
                   <button class="btn btn-sm btn-ghost border border-[var(--color-border)] shrink-0" :disabled="installingMacro" title="立即把同步宏装进上面的目录（留空则自动探测）" @click="installAegisubMacro">{{ installingMacro ? '安装中…' : '安装宏' }}</button>
                 </div>
               </label>
+              <div class="pt-2 border-t border-[var(--color-border)] space-y-2">
+                <span class="app-label">staff 制作人员行（随导出写入 ass 顶部 0:00~0:05；留空的职位不输出；时轴与轴校&压制为同一人时自动合并为「时轴&轴校&压制」）</span>
+                <div class="grid grid-cols-2 gap-2">
+                  <input class="app-input" v-model="staff.group" placeholder="字幕组（字幕制作 by …）" />
+                  <input class="app-input" v-model="staff.episode" placeholder="话数（如 第一话）" />
+                  <input class="app-input" v-model="staff.title" placeholder="标题（如 六周年）" />
+                  <input class="app-input" v-model="staff.recorder" placeholder="录制" />
+                  <input class="app-input" v-model="staff.translator" placeholder="翻译" />
+                  <input class="app-input" v-model="staff.proofread" placeholder="校对" />
+                  <input class="app-input" v-model="staff.timer" placeholder="时轴" />
+                  <input class="app-input" v-model="staff.suppressor" placeholder="轴校&压制" />
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="app-help shrink-0">预设</span>
+                  <select class="app-input w-36" v-model="stPresets.sel.value" @change="stPresets.applySel()">
+                    <option value="">— 选择预设 —</option>
+                    <option v-for="p in stPresets.list.value" :key="p.name" :value="p.name">{{ p.name }}</option>
+                  </select>
+                  <input class="app-input w-36" v-model="stPresets.nameInput.value" placeholder="新预设名" />
+                  <button class="btn btn-xs btn-ghost border border-[var(--color-border)]" @click="stPresets.save()">保存预设</button>
+                  <button class="btn btn-xs btn-ghost border border-[var(--color-border)]" :disabled="!stPresets.sel.value" @click="stPresets.remove()">删除</button>
+                </div>
+              </div>
               <p class="app-help">
                 导出后在 Aegisub 里精调直接 Ctrl+S 保存即可，轴机会自动回读译文与换行时间（也可点「从 Aegisub 拉取」手动回读）；轴机侧再改动后点「推送到 Aegisub」，在 Aegisub 里运行「自动化 → SekaiText → 从轴机拉取」应用（同步宏随导出自动安装，装不上就在上面指定目录后点「安装宏」，首次需重启 Aegisub）。
               </p>
