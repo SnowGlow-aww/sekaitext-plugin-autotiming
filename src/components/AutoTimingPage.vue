@@ -3,7 +3,7 @@
 // 压制保持在下方整宽（下滑可见）。导出内建 tools.lua 清理 + Aegisub 双向同步。
 import { ref, shallowRef, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { toast, pickFile, pickSave, goHome } from '../host'
-import { ENCODERS } from '../constants'
+import { FALLBACK_ENCODERS, FALLBACK_DEFAULT_ENCODER, encoderLabel } from '../constants'
 import { api, post, type EngineLine, type LinesPayload } from '../engine'
 import LineRow from './LineRow.vue'
 // 内置团队样式模板：随插件分发，导出时整段直传后端 —— 开箱即用，无需人手一份文件。
@@ -481,7 +481,29 @@ async function pushToAegisub() {
 const sourceVideo = ref('')
 const sourceSubtitle = ref('')
 const outputPath = ref('')
-const encoder = ref('HevcVideoToolbox')
+// 编码器：上次手选的优先，否则按平台给个必然能跑的默认（此前写死 HevcVideoToolbox，
+// Windows 上 "Unknown encoder" 压制 100% 起不来）。宿主 ≥5.7.3 时 probeEncoders 会
+// 拿到按显卡逐个试编码验证过的列表 + 推荐项，自动精确化。
+const ENCODER_KEY = 'autotiming:encoder'
+const encoder = ref(localStorage.getItem(ENCODER_KEY) || FALLBACK_DEFAULT_ENCODER)
+watch(encoder, (v) => { try { localStorage.setItem(ENCODER_KEY, v) } catch { /* ignore */ } })
+const encoderOptions = ref<string[]>([...FALLBACK_ENCODERS])
+const recommendedEncoder = ref('')
+let encodersProbed = false
+async function probeEncoders() {
+  if (encodersProbed) return
+  try {
+    const p = await api('/engine/suppress/probe')
+    if (!Array.isArray(p.encoders) || !p.encoders.length) return // 老内核（<2.1.0）没这字段，维持兜底
+    encodersProbed = true
+    encoderOptions.value = p.encoders
+    recommendedEncoder.value = p.recommended || ''
+    // 当前选择（含历史持久化值，比如换过机器/显卡）不在本机可用列表 → 换成推荐项
+    if (!p.encoders.includes(encoder.value)) {
+      encoder.value = p.recommended && p.encoders.includes(p.recommended) ? p.recommended : p.encoders[0]
+    }
+  } catch { /* 老宿主 404 / 引擎忙：维持兜底列表，下次进入页面再试 */ }
+}
 const crf = ref<number | string>(21) // input may yield '' when cleared; keep 0 distinct
 const useHwAccelDecode = ref(true)
 
@@ -528,6 +550,8 @@ async function refreshEngineStatus() {
     engineReady.value = !!s.ready
     engineError.value = s.error || ''
     engineVersion.value = s.engine ? s.engine.name + ' v' + s.engine.version : ''
+    // 内核在位就探测本机可用编码器（结果后端缓存，只有首次真的跑试编码）
+    if (engineAvailable.value) void probeEncoders()
   } catch (e: any) {
     engineAvailable.value = false
     engineReady.value = false
@@ -1019,8 +1043,11 @@ async function cancelSuppressTask(id: string) {
           <label class="block">
             <span class="app-label">编码器</span>
             <select class="app-input mt-1" v-model="encoder">
-              <option v-for="e in ENCODERS" :key="e" :value="e">{{ e }}</option>
+              <option v-for="e in encoderOptions" :key="e" :value="e">{{ encoderLabel(e) }}</option>
             </select>
+            <span v-if="recommendedEncoder" class="app-help mt-1 block">
+              已按本机显卡检测可用编码器{{ encoder === recommendedEncoder ? '，当前为推荐项' : '，推荐：' + encoderLabel(recommendedEncoder) }}
+            </span>
           </label>
           <label class="block">
             <span class="app-label">CRF / 质量</span>
