@@ -1029,7 +1029,7 @@ async function cancelSuppressTask(id: string) {
             <div v-if="showExportOpts" class="mt-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-3 space-y-2">
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="checkbox checkbox-sm" v-model="cleanExport" />
-                <span class="app-label">成品清理（样式按分行数改 1行/2行/3行、删角色名与调试行；\N 保留）</span>
+                <span class="app-label">成品清理（样式按原文行数改 1行/2行/3行、删角色名与调试行；\N 保留）</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="checkbox checkbox-sm" v-model="exportSyncTags" />
