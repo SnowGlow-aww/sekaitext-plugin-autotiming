@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 双列布局：左列=输入与运行控制（对照 Avalonia 独立版），右列=行列表与分句微调；
 // 压制保持在下方整宽（下滑可见）。导出内建 tools.lua 清理 + Aegisub 双向同步。
-import { ref, shallowRef, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
+import { ref, shallowRef, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { toast, pickFile, pickSave, goHome } from '../host'
 import { FALLBACK_ENCODERS, FALLBACK_DEFAULT_ENCODER, encoderLabel } from '../constants'
 import { api, post, type EngineLine, type LinesPayload } from '../engine'
@@ -95,11 +95,33 @@ function taskStatusLabel(t: TaskSnap) {
   if (t.status === 'canceled') return '已取消'
   return t.status
 }
+// 后台任务终态 toast：并行模式下没被「当前查看」的任务完成/失败时也要有感知，
+// 否则用户只能盯着列表里 2 秒才刷一次的百分比猜。首次快照只做基线（插件重挂载
+// 时不为历史终态补弹）；当前查看的任务由 pollSuppress/pollTiming 的精确 toast 负责。
+const lastTaskStatuses = new Map<string, string>()
+let taskStatusesPrimed = false
+function noteTaskTransitions(tasks: TaskSnap[], kind: 'timing' | 'suppress') {
+  for (const t of tasks) {
+    const key = kind + ':' + t.taskId
+    const prev = lastTaskStatuses.get(key)
+    lastTaskStatuses.set(key, t.status)
+    if (!taskStatusesPrimed || prev === t.status || t.status === 'running') continue
+    const viewedId = kind === 'suppress' ? suppressTaskId.value : timingTaskId.value
+    if (t.taskId === viewedId) continue
+    const name = baseName(kind === 'suppress' ? t.outputPath || t.sourceVideo : t.videoPath) || t.taskId
+    const label = kind === 'suppress' ? '压制' : '打轴'
+    if (t.status === 'done') toast(`「${name}」${label}完成`, 'success')
+    else if (t.status === 'error') toast(`「${name}」${label}失败: ` + (t.error || ''), 'error', 8000)
+  }
+}
 async function pollTasks() {
   try {
     const r = await api('/engine/tasks')
     timingTasks.value = r.timing || []
     suppressTasks.value = r.suppress || []
+    noteTaskTransitions(timingTasks.value, 'timing')
+    noteTaskTransitions(suppressTasks.value, 'suppress')
+    taskStatusesPrimed = true
     hostNoTasks.value = false
     if (!tasksAdopted) {
       tasksAdopted = true
@@ -190,10 +212,13 @@ async function activateSuppressTask(id: string) {
     suppressStatus.value = snap.status
     suppressPercent.value = snap.percent || 0
     suppressLog.value = snap.error || ''
+    if (suppressLogOpen.value) void fetchSuppressLog()
     return
   }
   await pollSuppress()
-  if (suppressStatus.value === 'running') suppressTimer = setInterval(pollSuppress, 500)
+  if (suppressStatus.value === 'running' && !suppressTimer) suppressTimer = setInterval(pollSuppress, 500)
+  if (suppressLogOpen.value) void fetchSuppressLog()
+  syncSuppressLogTimer()
 }
 
 const timingTaskId = ref('')
@@ -519,6 +544,12 @@ let suppressTimer: any = null
 const previewSrc = computed(() => (previewB64.value ? 'data:image/jpeg;base64,' + previewB64.value : ''))
 const timingRunning = computed(() => timingStatus.value === 'running')
 const suppressRunning = computed(() => suppressStatus.value === 'running')
+// 主进度区显示的是哪个任务：并行模式下不标名字的话，切换/新建任务时进度条
+// "凭空跳变"，正是「进度无法正确显示」观感的一大来源
+const suppressViewedName = computed(() => {
+  const t = suppressTasks.value.find((x) => x.taskId === suppressTaskId.value)
+  return baseName(t?.outputPath || t?.sourceVideo || outputPath.value || sourceVideo.value)
+})
 
 // --- file pickers (host Tauri dialog → absolute path) ---
 async function browse(setter: (v: string) => void, filters: any[], opts?: { save?: boolean; def?: string }) {
@@ -584,10 +615,11 @@ onActivated(() => {
   if (suppressTaskId.value && suppressStatus.value === 'running' && !suppressTimer) {
     suppressTimer = setInterval(pollSuppress, 500)
   }
+  syncSuppressLogTimer()
 })
 function clearAllTimers() {
-  for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer, tasksTimer]) if (t) clearInterval(t)
-  timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = tasksTimer = null
+  for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer, tasksTimer, suppressLogTimer]) if (t) clearInterval(t)
+  timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = tasksTimer = suppressLogTimer = null
   if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
 }
 
@@ -650,9 +682,12 @@ function stopTimingPolls() {
   timingTimer = previewTimer = linesTimer = null
 }
 async function pollTiming() {
-  if (!timingTaskId.value) return
+  const id = timingTaskId.value
+  if (!id) return
   try {
-    const p = await api('/engine/timing/progress?task=' + timingTaskId.value)
+    const p = await api('/engine/timing/progress?task=' + id)
+    // 等待响应期间切换了查看的任务：丢弃，防止旧任务的数据/终态 toast 盖到新任务头上
+    if (timingTaskId.value !== id) return
     timingStatus.value = p.status
     timingPercent.value = p.percent || 0
     timingFps.value = p.fps || 0
@@ -669,9 +704,11 @@ async function pollTiming() {
   } catch { /* transient; keep polling */ }
 }
 async function pollPreview() {
-  if (!timingTaskId.value) return
+  const id = timingTaskId.value
+  if (!id) return
   try {
-    const p = await api('/engine/timing/preview?task=' + timingTaskId.value)
+    const p = await api('/engine/timing/preview?task=' + id)
+    if (timingTaskId.value !== id) return
     if (p.base64) previewB64.value = p.base64
   } catch { /* ignore */ }
 }
@@ -720,19 +757,77 @@ function resetSuppress() {
   stopSuppressPoll()
   suppressPercent.value = 0; suppressFrame.value = 0; suppressTotal.value = 0
   suppressFps.value = 0; suppressLog.value = ''
+  suppressLogLines.value = []; suppressLogPath.value = ''
 }
-async function pollSuppress() {
-  if (!suppressTaskId.value) return
+
+// --- 压制日志（宿主 ≥5.7.4：滚动日志端点 + 报错自动导出文件） ---
+const suppressLogOpen = ref(false)
+const suppressLogLines = ref<string[]>([])
+const suppressLogPath = ref('')
+const hostNoSuppressLog = ref(false) // 老宿主没有 /engine/suppress/log 路由
+let suppressLogTimer: any = null
+const suppressLogPre = ref<HTMLElement | null>(null)
+
+async function fetchSuppressLog() {
+  const id = suppressTaskId.value
+  if (!id || hostNoSuppressLog.value) return
   try {
-    const p = await api('/engine/suppress/progress?task=' + suppressTaskId.value)
+    const l = await api('/engine/suppress/log?task=' + id)
+    if (suppressTaskId.value !== id) return
+    suppressLogLines.value = l.lines || []
+    if (l.path) suppressLogPath.value = l.path
+    void nextTick(() => {
+      const el = suppressLogPre.value
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  } catch (e: any) {
+    // 路由不存在（老宿主，报文是裸 404）→ 隐藏日志面板；任务被修剪掉的 404 带
+    // "task not found" 报文，不能据此判定宿主太旧
+    if (e && e.status === 404 && /^HTTP /.test(String(e.message || ''))) hostNoSuppressLog.value = true
+  }
+}
+async function exportSuppressLog() {
+  const id = suppressTaskId.value
+  if (!id) return
+  try {
+    const r = await post('/engine/suppress/log/export?task=' + id)
+    suppressLogPath.value = r.path || ''
+    toast('日志已导出: ' + r.path, 'success', 6000)
+  } catch (e: any) {
+    toast('导出日志失败: ' + e.message, 'error')
+  }
+}
+// 面板开着且任务在跑时才轮询日志（1.5s 一次，纯内存快照，够轻）
+function syncSuppressLogTimer() {
+  const want = suppressLogOpen.value && !!suppressTaskId.value && suppressRunning.value && !hostNoSuppressLog.value
+  if (want && !suppressLogTimer) suppressLogTimer = setInterval(fetchSuppressLog, 1500)
+  if (!want && suppressLogTimer) { clearInterval(suppressLogTimer); suppressLogTimer = null }
+}
+watch([suppressLogOpen, suppressRunning], () => {
+  if (suppressLogOpen.value) void fetchSuppressLog()
+  syncSuppressLogTimer()
+})
+async function pollSuppress() {
+  const id = suppressTaskId.value
+  if (!id) return
+  try {
+    const p = await api('/engine/suppress/progress?task=' + id)
+    // 等待响应期间切换/新建了任务：丢弃旧任务的响应——并行模式下这会把上一个
+    // 任务的百分比/终态写进新任务的显示（进度条来回跳 + 误弹完成/失败 toast）
+    if (suppressTaskId.value !== id) return
     suppressStatus.value = p.status
     suppressPercent.value = p.percent || 0
     suppressFrame.value = p.frame || 0
     suppressTotal.value = p.total || 0
     suppressFps.value = p.fps || 0
     suppressLog.value = p.lastLog || ''
+    if (p.logPath) suppressLogPath.value = p.logPath
     if (p.status === 'done') { stopSuppressPoll(); toast('压制完成: ' + (p.outputPath || outputPath.value), 'success') }
-    else if (p.status === 'error') { stopSuppressPoll(); toast('压制失败: ' + (p.error || ''), 'error') }
+    else if (p.status === 'error') {
+      stopSuppressPoll()
+      void fetchSuppressLog() // 抓终态日志尾巴 + 自动导出的文件路径
+      toast('压制失败: ' + (p.error || '') + (p.logPath ? '（日志已自动导出，见压制日志面板）' : ''), 'error', 8000)
+    }
     else if (p.status === 'canceled') { stopSuppressPoll() }
   } catch { /* ignore */ }
 }
@@ -1070,24 +1165,41 @@ async function cancelSuppressTask(id: string) {
           <div
             v-for="t in suppressTasks"
             :key="t.taskId"
-            class="flex items-center gap-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-2 text-xs cursor-pointer hover:bg-[var(--color-surface)]"
+            class="rounded-[var(--radius-control)] border border-[var(--color-border)] p-2 text-xs cursor-pointer hover:bg-[var(--color-surface)]"
             :style="t.taskId === suppressTaskId ? { borderColor: 'var(--color-primary)', background: 'color-mix(in oklch, var(--color-primary) 8%, transparent)' } : {}"
             :title="t.outputPath"
             @click="activateSuppressTask(t.taskId)"
           >
-            <span class="truncate flex-1">{{ baseName(t.outputPath) || baseName(t.sourceVideo) || t.taskId }}</span>
-            <span class="app-help shrink-0">{{ taskStatusLabel(t) }}</span>
-            <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
+            <div class="flex items-center gap-2">
+              <span class="truncate flex-1">{{ baseName(t.outputPath) || baseName(t.sourceVideo) || t.taskId }}</span>
+              <span class="app-help shrink-0">{{ taskStatusLabel(t) }}</span>
+              <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
+            </div>
+            <!-- 每个并行任务自己的进度条：主进度区只跟当前查看的任务，其余任务
+                 的进度在这里各自独立显示，互不串线 -->
+            <progress v-if="t.status === 'running'" class="progress progress-primary w-full h-1 mt-1" :value="t.percent || 0" max="100"></progress>
           </div>
         </div>
 
         <div v-if="suppressStatus">
           <progress class="progress progress-primary w-full" :value="suppressPercent" max="100"></progress>
           <div class="app-help mt-1">
-            {{ suppressStatus }} · {{ suppressPercent.toFixed(1) }}% · 帧 {{ suppressFrame }}/{{ suppressTotal }} · fps {{ suppressFps.toFixed(0) }}
+            <span v-if="suppressViewedName" class="font-medium">{{ suppressViewedName }} · </span>{{ suppressStatus }} · {{ suppressPercent.toFixed(1) }}% · 帧 {{ suppressFrame }}/{{ suppressTotal }} · fps {{ suppressFps.toFixed(0) }}
           </div>
           <code v-if="suppressLog" class="block truncate app-help" style="font-size:10px">{{ suppressLog }}</code>
         </div>
+
+        <!-- 压制日志（宿主 ≥5.7.4）：滚动日志 + 报错自动导出；手动导出留档 -->
+        <details v-if="suppressTaskId && !hostNoSuppressLog" class="rounded-[var(--radius-control)] border border-[var(--color-border)]" @toggle="(e: any) => { suppressLogOpen = e.target.open }">
+          <summary class="cursor-pointer select-none px-2 py-1 text-xs app-help">压制日志{{ suppressLogPath ? '（已导出文件）' : '' }}</summary>
+          <div class="p-2 pt-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <button class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click="exportSuppressLog">导出日志文件</button>
+              <code v-if="suppressLogPath" class="app-help truncate flex-1 select-all" style="font-size:10px" :title="suppressLogPath">{{ suppressLogPath }}</code>
+            </div>
+            <pre ref="suppressLogPre" class="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--color-surface)] p-2 text-[10px] leading-4">{{ suppressLogLines.length ? suppressLogLines.join('\n') : '（暂无日志）' }}</pre>
+          </div>
+        </details>
       </div>
     </div>
   </div>
