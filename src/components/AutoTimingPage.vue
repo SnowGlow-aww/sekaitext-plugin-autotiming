@@ -176,6 +176,8 @@ async function activateTimingTask(id: string) {
   lines.value = []; linesFps.value = 0; expandedKey.value = ''
   exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
   const p = await api('/engine/timing/progress?task=' + id).catch(() => null)
+  // 等待响应期间又切了查看的任务：丢弃，防止旧任务进度/终态盖到新任务视图上
+  if (timingTaskId.value !== id) return
   if (!p) { timingStatus.value = snap?.status || ''; return }
   timingStatus.value = p.status
   timingPercent.value = p.percent || 0
@@ -189,9 +191,11 @@ async function activateTimingTask(id: string) {
     if (!hostTooOld.value) linesTimer = setInterval(loadLines, 2000)
   } else if (p.status === 'done') {
     await loadLines()
+    if (timingTaskId.value !== id) return
     // 恢复导出/同步状态（导出过的任务重新挂上自动回读）
     try {
       const s = await api('/engine/timing/sync/status?task=' + id)
+      if (timingTaskId.value !== id) return
       if (s.exported) {
         exportedAss.value = s.assPath
         syncStatus.value = s
@@ -216,6 +220,8 @@ async function activateSuppressTask(id: string) {
     return
   }
   await pollSuppress()
+  // 等待响应期间又切了查看的任务：丢弃，别给旧任务挂轮询/抓日志
+  if (suppressTaskId.value !== id) return
   if (suppressStatus.value === 'running' && !suppressTimer) suppressTimer = setInterval(pollSuppress, 500)
   if (suppressLogOpen.value) void fetchSuppressLog()
   syncSuppressLogTimer()
@@ -258,13 +264,17 @@ function toggleExpand(l: EngineLine) {
 }
 
 async function loadLines() {
-  if (!timingTaskId.value) return
+  const id = timingTaskId.value
+  if (!id) return
   try {
-    const p: LinesPayload = await api('/engine/timing/lines?task=' + timingTaskId.value)
+    const p: LinesPayload = await api('/engine/timing/lines?task=' + id)
+    // 等待响应期间切换了查看的任务：丢弃，防止旧任务的行数据盖到新任务视图上
+    if (timingTaskId.value !== id) return
     linesFps.value = p.fps || 0
     lines.value = (p.lines || []).slice().sort((a, b) => a.startIndex - b.startIndex)
     hostTooOld.value = false
   } catch (e: any) {
+    if (timingTaskId.value !== id) return
     // 进度端点正常而行列表 404 = 后端没有该路由（app 版本太旧）
     if (e && e.status === 404 && (timingStatus.value === 'running' || timingStatus.value === 'done')) {
       hostTooOld.value = true
@@ -460,9 +470,13 @@ function startSyncPoll() {
   pollSync()
 }
 async function pollSync() {
-  if (!exportedAss.value || !timingTaskId.value) return
+  const id = timingTaskId.value
+  if (!exportedAss.value || !id) return
   try {
-    const s = await api('/engine/timing/sync/status?task=' + timingTaskId.value)
+    const s = await api('/engine/timing/sync/status?task=' + id)
+    // 等待响应期间切换了查看的任务：丢弃，防止旧任务 sync 状态盖到新任务、
+    // 并对新任务多触发一次 pullFromAegisub
+    if (timingTaskId.value !== id) return
     syncStatus.value = s
     // Aegisub 里 Ctrl+S 保存 → 自动回读换行时间，轴机列表跟着刷新
     if (s.changedOnDisk && !pulling.value) await pullFromAegisub()
