@@ -301,11 +301,13 @@ function onLineUpdated(nl: EngineLine) {
 let autosaveTimer: any = null
 function scheduleAutosave() {
   if (autosaveTimer) clearTimeout(autosaveTimer)
+  const id = timingTaskId.value
   autosaveTimer = setTimeout(async () => {
     autosaveTimer = null
-    if (timingStatus.value !== 'done' || !timingTaskId.value) return
+    // 防抖窗口内切了任务：这条微调属于旧任务，放弃，别落进新任务的恢复文件
+    if (timingTaskId.value !== id || timingStatus.value !== 'done' || !id) return
     try {
-      await post('/engine/timing/autosave?task=' + timingTaskId.value, {
+      await post('/engine/timing/autosave?task=' + id, {
         outputDir: assOutputDir.value,
         clean: cleanExport.value,
         syncTags: exportSyncTags.value,
@@ -434,10 +436,11 @@ const dirtyCount = computed(() => (syncStatus.value?.dirtyLines?.length as numbe
 async function exportAss() {
   if (timingStatus.value !== 'done' || exporting.value) return
   exporting.value = true
+  const id = timingTaskId.value
   try {
     // Aegisub 侧有未回读的保存时先拉取，导出才不会覆盖人家的精调
     if (syncStatus.value?.changedOnDisk) await pullFromAegisub(true)
-    const r = await post('/engine/timing/export?task=' + timingTaskId.value, {
+    const r = await post('/engine/timing/export?task=' + id, {
       outputDir: assOutputDir.value,
       clean: cleanExport.value,
       syncTags: exportSyncTags.value,
@@ -447,6 +450,8 @@ async function exportAss() {
       aegisubDir: aegisubDir.value, // 用户指定的 autoload 目录（便携版探测不到时）
       staff: staffPayload.value, // staff 制作人员行；全空则不注入
     })
+    // 等待导出响应期间切换了查看的任务：丢弃，别把本任务字幕写成新任务的压制输入
+    if (timingTaskId.value !== id) return
     exportedAss.value = r.assPath
     syncScriptPath.value = r.syncScript || ''
     aegisubMacroPath.value = r.aegisubMacro || ''
@@ -694,6 +699,7 @@ function stopTimingPolls() {
   if (previewTimer) clearInterval(previewTimer)
   if (linesTimer) clearInterval(linesTimer)
   timingTimer = previewTimer = linesTimer = null
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
 }
 async function pollTiming() {
   const id = timingTaskId.value
