@@ -738,7 +738,23 @@ async function onTimingDone() {
   stopTimingPolls()
   timingPercent.value = 100
   await loadLines() // 完成后引擎会补好每行的默认分隔帧（与导出同源的估算）
-  toast('打轴完成——右侧可逐行微调分句，确认后点「导出 ass」', 'success', 6000)
+  // 首次完成时把「过长行」直接推到眼前：新人常不知道过长行可逐句调分句——分句编辑器默认折叠、
+  // 过长行又混在几十句里不显眼（用户反馈：第一次用不知道能在哪调，直接导出了）。有过长行就自动
+  // 打开「仅显示过长行」筛选 + 展开第一条的分句编辑器，并给一条说明性提示。此逻辑只在**新完成**时
+  // 走一次（切换查看已完成的旧任务走 activateTimingTask，不经这里），不会反复打扰。
+  const firstTooLong = dialogLines.value.find((l) => l.needSetSeparator)
+  if (firstTooLong) {
+    showTooLongOnly.value = true
+    expandedKey.value = lineKey(firstTooLong)
+    toast(
+      `打轴完成——有 ${tooLongCount.value} 句过长(译文需分两行显示)已为你筛出并展开，逐句拖动分句点调整；`
+      + '取消「仅显示过长行」可看全部，确认后点「导出 ass」',
+      'info',
+      9000,
+    )
+  } else {
+    toast('打轴完成——右侧可逐行微调分句，确认后点「导出 ass」', 'success', 6000)
+  }
 }
 async function cancelTiming() {
   // 带 task 精确取消当前查看的任务（并行模式必需；老宿主忽略该参数，行为不变）
@@ -861,6 +877,18 @@ async function cancelSuppress() {
 }
 async function cancelSuppressTask(id: string) {
   try { await post('/engine/cancel?domain=suppress&task=' + id) } catch { /* ignore */ }
+  void pollTasks()
+}
+// 关闭并从列表移除一个压制任务（含已取消/完成/失败的终态卡片——此前只有「取消」没有「移除」，
+// 终态卡片只能堆着）。镜像打轴侧 closeTask：后端释放其内核进程，前端若关的是当前查看的任务就清空显示。
+async function closeSuppressTask(id: string) {
+  try { await post('/engine/suppress/close?task=' + id) } catch { /* ignore */ }
+  if (id === suppressTaskId.value) {
+    if (suppressLogTimer) { clearInterval(suppressLogTimer); suppressLogTimer = null }
+    suppressTaskId.value = ''
+    suppressStatus.value = ''
+    resetSuppress()
+  }
   void pollTasks()
 }
 </script>
@@ -1194,6 +1222,9 @@ async function cancelSuppressTask(id: string) {
               <span class="truncate flex-1">{{ baseName(t.outputPath) || baseName(t.sourceVideo) || t.taskId }}</span>
               <span class="app-help shrink-0">{{ taskStatusLabel(t) }}</span>
               <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
+              <!-- ✕ 只给终态卡片：运行中的压制必须走「取消」（suppress.stop 才会杀 ffmpeg
+                   进程树），硬移除会留下孤儿 ffmpeg 继续编码，后端对 running 也拒绝(409)。 -->
+              <button v-if="t.status !== 'running'" class="btn btn-xs btn-ghost shrink-0" title="移除任务" @click.stop="closeSuppressTask(t.taskId)">✕</button>
             </div>
             <!-- 每个并行任务自己的进度条：主进度区只跟当前查看的任务，其余任务
                  的进度在这里各自独立显示，互不串线 -->
