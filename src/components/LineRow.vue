@@ -245,6 +245,11 @@ async function saveEdit() {
 
     <!-- 分句编辑器 -->
     <div v-if="expanded && isDialog" class="border-t border-[var(--color-border)] px-3 py-3 space-y-3">
+      <!-- 日语原文常驻对照：分割点要对着原文的语气/停顿下刀，只看译文没法定 -->
+      <div>
+        <div class="app-label mb-1">日语原文</div>
+        <div class="app-help whitespace-pre-wrap">{{ line.body }}</div>
+      </div>
       <label v-if="canSeparate" class="flex items-center gap-2 cursor-pointer w-fit">
         <input type="checkbox" class="checkbox checkbox-sm" :checked="!!line.useSeparator" @change="toggleSeparator" />
         <span class="app-label">分句（长行切成前后两条）</span>
