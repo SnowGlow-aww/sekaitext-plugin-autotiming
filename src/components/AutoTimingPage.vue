@@ -533,6 +533,16 @@ const encoder = ref(localStorage.getItem(ENCODER_KEY) || FALLBACK_DEFAULT_ENCODE
 watch(encoder, (v) => { try { localStorage.setItem(ENCODER_KEY, v) } catch { /* ignore */ } })
 const encoderOptions = ref<string[]>([...FALLBACK_ENCODERS])
 const recommendedEncoder = ref('')
+// 内核 ≥2.3.6 附带：未通过试编码的硬件编码器 → 原因摘要（RTX 机器上 NVENC
+// 消失这类"该在却不在"直接给病因），以及字体子系统体检结果（字体缓存损坏的
+// 机器压制会无声挂起，提前在面板上亮警告）。老内核没这些字段 → 界面不变。
+const encoderFailures = ref<Record<string, string>>({})
+const fontCheckWarn = ref('')
+const failedEncoderText = computed(() =>
+  Object.entries(encoderFailures.value)
+    .map(([name, reason]) => `${encoderLabel(name)}：${reason}`)
+    .join('\n'),
+)
 let encodersProbed = false
 async function probeEncoders() {
   if (encodersProbed) return
@@ -542,6 +552,9 @@ async function probeEncoders() {
     encodersProbed = true
     encoderOptions.value = p.encoders
     recommendedEncoder.value = p.recommended || ''
+    encoderFailures.value = p.encoderFailures && typeof p.encoderFailures === 'object' ? p.encoderFailures : {}
+    const fc = p.fontCheck
+    fontCheckWarn.value = fc && (fc.status === 'slow' || fc.status === 'hung') ? String(fc.message || '') : ''
     // 当前选择（含历史持久化值，比如换过机器/显卡）不在本机可用列表 → 换成推荐项
     if (!p.encoders.includes(encoder.value)) {
       encoder.value = p.recommended && p.encoders.includes(p.recommended) ? p.recommended : p.encoders[0]
@@ -1181,6 +1194,14 @@ async function closeSuppressTask(id: string) {
           </div>
         </label>
 
+        <!-- 字体子系统体检警告（内核 ≥2.3.6）：字体缓存损坏的机器压制会无声挂起，开压前就亮牌 -->
+        <div
+          v-if="fontCheckWarn"
+          class="rounded-[var(--radius-control)] border border-[var(--color-border)] bg-warning/10 text-warning p-3 text-sm"
+        >
+          ⚠️ 字体子系统检测：{{ fontCheckWarn }}
+        </div>
+
         <!-- 编码器占满剩余宽、CRF 固定列宽，两者等高成列 -->
         <div class="grid grid-cols-[1fr_7rem] gap-3">
           <label class="block">
@@ -1191,6 +1212,10 @@ async function closeSuppressTask(id: string) {
             <span v-if="recommendedEncoder" class="app-help mt-1 block">
               已按本机显卡检测可用编码器{{ encoder === recommendedEncoder ? '，当前为推荐项' : '，推荐：' + encoderLabel(recommendedEncoder) }}
             </span>
+            <details v-if="failedEncoderText" class="mt-1">
+              <summary class="app-help cursor-pointer select-none">部分硬件编码器未通过检测（点开看原因）</summary>
+              <div class="app-help whitespace-pre-wrap mt-1">{{ failedEncoderText }}</div>
+            </details>
           </label>
           <label class="block">
             <span class="app-label">CRF / 质量</span>
