@@ -54,7 +54,12 @@ export interface LinesPayload {
 
 // 与引擎 C# TrimAll 同口径：去掉 \R、\N 字面量与真实换行，再修剪首尾空白。
 export function trimAll(s: string): string {
-  return (s || '').split('\\N').join('').split('\\R').join('').replace(/[\r\n]/g, '').trim()
+  return (s || '')
+    .split('\\N').join('')
+    .split('\\R').join('')
+    .split('\\n').join('')
+    .replace(/[\r\n]/g, '')
+    .trim()
 }
 
 // 帧 → ASS 风格时间显示 "0:00:11.86"

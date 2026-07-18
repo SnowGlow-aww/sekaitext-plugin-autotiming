@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 结果面板里的一行：对话行可展开分句编辑器（文本分割点 + 换行帧微调 +
-// 该帧画面实时预览 + 打字速度建议帧 + 按字数均分），双击译文可快速编辑。
+// 该帧画面实时预览 + 打字速度建议帧 + 按字数均分）；对话译文和地点横幅
+// 都可双击快速编辑。
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { api, post, trimAll, frameToTime, CHAR_TIME_MS, type EngineLine } from '../engine'
 
@@ -17,6 +18,8 @@ const emit = defineEmits<{
 }>()
 
 const isDialog = computed(() => props.line.type === 'dialog')
+const isBanner = computed(() => props.line.type === 'banner')
+const isEditable = computed(() => isDialog.value || isBanner.value)
 // 原文 3 行才允许分句（与 GUI QuickEdit 的 CanReturn 一致）
 const canSeparate = computed(
   () => isDialog.value && (props.line.body.match(/\n/g)?.length ?? 0) >= 2,
@@ -24,7 +27,33 @@ const canSeparate = computed(
 
 const startTime = computed(() => frameToTime(props.line.startIndex, props.fps))
 const endTime = computed(() => frameToTime(props.line.endIndex, props.fps))
-const displayText = computed(() => props.line.bodyTranslated || props.line.body)
+
+// 对齐桌面 QuickEdit：\R 是时间分轴点；同一译文里存在 \R 时，\N/\n 只负责
+// 原 ASS 的排版，进入编辑器前移除，避免一次无改动保存把断点提前到 \N。
+function dialogEditText(text: string): string {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  if (normalized.includes('\\R')) {
+    return normalized
+      .replace(/\n/g, '')
+      .replace(/\\(?:N|n)/g, '')
+      .replace(/\\R/g, '\n')
+  }
+  return normalized.replace(/\\(?:N|n)/g, '\n')
+}
+
+function hasValidExplicitSplit(text: string): boolean {
+  const normalized = dialogEditText(text)
+  const first = normalized.indexOf('\n')
+  return first > 0
+    && first === normalized.lastIndexOf('\n')
+    && trimAll(normalized.slice(0, first)).length > 0
+    && trimAll(normalized.slice(first + 1)).length > 0
+}
+
+const displayText = computed(() => {
+  const text = props.line.bodyTranslated || props.line.body
+  return isDialog.value ? dialogEditText(text) : text
+})
 
 // --- 分句本地编辑态（提交成功后以引擎回包为准） ---
 const ci = ref(props.line.separatorContentIndex ?? 1)
@@ -177,28 +206,47 @@ onUnmounted(() => {
   for (const t of [commitTimer, suggestTimer, thumbTimer]) if (t) clearTimeout(t)
 })
 
-// --- 译文快速编辑（双击进入；对齐 QuickEdit：最多 2 行） ---
+// --- 译文/地点横幅快速编辑（双击进入；对话对齐 QuickEdit：最多 2 行） ---
 const editing = ref(false)
 const editText = ref('')
 function startEdit() {
-  if (!isDialog.value) return
-  editText.value = props.line.bodyTranslated
+  if (!isEditable.value) return
+  const current = props.line.bodyTranslated || (isBanner.value ? props.line.body : '')
+  editText.value = isDialog.value ? dialogEditText(current) : current
   editing.value = true
 }
 function onEditInput() {
-  const parts = editText.value.split('\n')
-  if (parts.length > 2) editText.value = parts.slice(0, 2).join('\n') + parts.slice(2).join('')
+  if (isBanner.value) {
+    editText.value = editText.value.replace(/[\r\n]+/g, '')
+    return
+  }
+  const parts = dialogEditText(editText.value).split('\n')
+  editText.value = parts.length > 2
+    ? parts.slice(0, 2).join('\n') + parts.slice(2).join('')
+    : parts.join('\n')
 }
 async function saveEdit() {
   try {
-    const updated = await post('/engine/timing/line/translation?task=' + props.taskId, {
+    const endpoint = isBanner.value
+      ? '/engine/timing/line/banner-translation'
+      : '/engine/timing/line/translation'
+    const explicitSplit = isDialog.value && hasValidExplicitSplit(editText.value)
+    const updated = await post(endpoint + '?task=' + props.taskId, {
       index: props.line.index,
       text: editText.value,
+      // 保留用户已选择的分句状态；显式回车/\N 则明确表示把三行原文拆成两条轴。
+      useSeparator: isDialog.value
+        ? (!!props.line.useSeparator || (canSeparate.value && explicitSplit))
+        : undefined,
     })
     editing.value = false
     emit('updated', updated)
   } catch (e: any) {
-    emit('error', '保存译文失败: ' + e.message)
+    if (isBanner.value && e?.status === 404) {
+      emit('error', '保存地点横幅失败：需要更新 SekaiText 主程序')
+    } else {
+      emit('error', (isBanner.value ? '保存地点横幅失败: ' : '保存译文失败: ') + e.message)
+    }
   }
 }
 </script>
@@ -223,8 +271,14 @@ async function saveEdit() {
       <span class="app-help tabular-nums ml-auto">{{ endTime }}</span>
     </div>
 
-    <!-- 正文（对话行双击快速编辑） -->
-    <div v-if="!editing" class="px-3 pb-2 pt-1 text-sm whitespace-pre-wrap" :title="isDialog ? '双击编辑译文' : ''" @dblclick="startEdit">
+    <!-- 正文（对话译文/地点横幅双击快速编辑） -->
+    <div
+      v-if="!editing"
+      class="px-3 pb-2 pt-1 text-sm whitespace-pre-wrap"
+      :class="isEditable ? 'cursor-text' : ''"
+      :title="isDialog ? '双击编辑译文' : isBanner ? '双击编辑地点横幅' : ''"
+      @dblclick="startEdit"
+    >
       {{ displayText }}
     </div>
     <div v-else class="px-3 pb-2 pt-1 space-y-2">
@@ -232,7 +286,7 @@ async function saveEdit() {
       <div class="app-help whitespace-pre-wrap" title="原文">{{ line.body }}</div>
       <textarea
         v-model="editText"
-        rows="2"
+        :rows="isBanner ? 1 : 2"
         class="app-input w-full text-sm"
         @input="onEditInput"
         @keydown.esc="editing = false"

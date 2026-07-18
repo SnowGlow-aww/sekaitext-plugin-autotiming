@@ -286,8 +286,9 @@ async function loadLines() {
 function onLineUpdated(nl: EngineLine) {
   const i = lines.value.findIndex((l) => l.type === nl.type && l.index === nl.index)
   if (i >= 0) lines.value[i] = { ...lines.value[i], ...nl }
-  // 本地乐观标脏，让「推送到 Aegisub」计数即时反馈（真值下轮 sync 轮询会覆盖）
-  if (exportedAss.value && syncStatus.value) {
+  // st:N 双向同步目前只覆盖 dialog；banner 保存后进入 autosave/重新导出，
+  // 不可拿它的独立 index 去污染同编号 dialog 的待推送状态。
+  if (nl.type === 'dialog' && exportedAss.value && syncStatus.value) {
     const d: number[] = syncStatus.value.dirtyLines || []
     if (!d.includes(nl.index)) syncStatus.value.dirtyLines = [...d, nl.index]
   }
