@@ -1090,11 +1090,21 @@ async function closeSuppressTask(id: string) {
             </button>
             <div v-if="showExportOpts" class="mt-2 rounded-[var(--radius-control)] border border-[var(--color-border)] p-3 space-y-2">
               <label class="flex items-center gap-2 cursor-pointer w-fit">
-                <input type="checkbox" class="checkbox checkbox-sm" v-model="cleanExport" />
+                <input type="checkbox" class="option-check-input" v-model="cleanExport" />
+                <span class="option-check-box" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none">
+                    <path d="m3.75 8.25 2.65 2.6 5.85-6" />
+                  </svg>
+                </span>
                 <span class="app-label">成品清理（样式按原文行数改 1行/2行/3行、删角色名与调试行；\N 保留）</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer w-fit">
-                <input type="checkbox" class="checkbox checkbox-sm" v-model="exportSyncTags" />
+                <input type="checkbox" class="option-check-input" v-model="exportSyncTags" />
+                <span class="option-check-box" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none">
+                    <path d="m3.75 8.25 2.65 2.6 5.85-6" />
+                  </svg>
+                </span>
                 <span class="app-label">写入 Aegisub 同步标识（在每行 Effect 字段埋 st:行号 作为对应标记，双向同步必需）</span>
               </label>
               <label class="block">
@@ -1281,3 +1291,54 @@ async function closeSuppressTask(id: string) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.option-check-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.option-check-box {
+  display: grid;
+  place-items: center;
+  width: 1.125rem;
+  height: 1.125rem;
+  flex: 0 0 1.125rem;
+  border: 1px solid var(--color-border-strong, var(--color-border));
+  border-radius: 0.35rem;
+  color: var(--accent, var(--color-primary));
+  background: color-mix(in oklch, var(--color-surface) 88%, transparent);
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+.option-check-box svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  overflow: visible;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 100ms ease, transform 120ms ease;
+}
+.option-check-box path {
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.option-check-input:checked + .option-check-box {
+  border-color: color-mix(in oklch, var(--accent, var(--color-primary)) 55%, var(--color-border));
+  background: color-mix(in oklch, var(--accent, var(--color-primary)) 12%, transparent);
+}
+.option-check-input:checked + .option-check-box svg {
+  opacity: 1;
+  transform: scale(1);
+}
+.option-check-input:focus-visible + .option-check-box {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent, var(--color-primary)) 18%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .option-check-box,
+  .option-check-box svg { transition: none; }
+}
+</style>
