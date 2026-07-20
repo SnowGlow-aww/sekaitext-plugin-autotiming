@@ -27,5 +27,5 @@ export function setup(host: any) {
 }
 
 export function teardown() {
-  // Route + sidebar removal handled by the host registry.
+  document.getElementById('sekai-plugin-autotiming-css')?.remove()
 }

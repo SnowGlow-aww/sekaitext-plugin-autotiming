@@ -1,0 +1,33 @@
+name: renew plugin market v3
+
+on:
+  schedule:
+    - cron: '17 4 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-market-write
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: plugin-market-signer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: node --test scripts/publish-market.test.mjs
+      - name: Verify prior signatures and renew v3 expiry
+        env:
+          MANIFEST_REPO_TOKEN: ${{ secrets.MANIFEST_REPO_TOKEN }}
+          PLUGIN_SIGNING_PRIVATE_KEY: ${{ secrets.PLUGIN_SIGNING_PRIVATE_KEY }}
+          PLUGIN_SIGNING_KEY_ID: ${{ vars.PLUGIN_SIGNING_KEY_ID }}
+          SEKAITEXT_PLUGIN_PUBLIC_KEYS: ${{ vars.SEKAITEXT_PLUGIN_PUBLIC_KEYS }}
+          MARKET_SEQUENCE: ${{ github.run_id }}
+        run: node scripts/publish-market.mjs --renew-only
