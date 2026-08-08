@@ -186,7 +186,7 @@ function readArchiveManifest(archive, expected) {
 
 function validatePayloads(index, marketDir) {
   exactObject(index, ALLOWED_INDEX_KEYS, 'index')
-  check(index.version === 2 || index.version === 3, 'index.version must be 2 or 3 before upgrade')
+  check(index.version === 3, 'publishing requires an authenticated v3 market snapshot')
   check(Array.isArray(index.plugins) && index.plugins.length > 0 && index.plugins.length <= 1000, 'plugins must be a non-empty bounded array')
   const seen = new Set()
   for (const entry of index.plugins) {
@@ -213,20 +213,14 @@ function validatePayloads(index, marketDir) {
 
 export function verifyExistingIndex(index, marketDir, trustMap, { allowExpired = true } = {}) {
   validatePayloads(index, marketDir)
-  if (index.version === 2) {
-    for (const key of ['publisher', 'keyId', 'signatureAlgorithm', 'sequence', 'expiresAt', 'snapshotSignature']) {
-      check(index[key] == null, `index.${key} is forbidden in v2`)
-    }
-  } else {
-    check(index.publisher === 'sekaitext-official', 'index.publisher is invalid')
-    check(/^[A-Za-z0-9._-]{1,64}$/.test(index.keyId ?? ''), 'index.keyId is invalid')
-    check(index.signatureAlgorithm === 'ed25519', 'index.signatureAlgorithm is invalid')
-    check(Number.isSafeInteger(index.sequence) && index.sequence > 0, 'index.sequence is invalid')
-    const expiry = new Date(index.expiresAt)
-    check(!Number.isNaN(expiry.valueOf()) && expiry.toISOString().replace('.000Z', 'Z') === index.expiresAt, 'index.expiresAt is invalid')
-    if (!allowExpired) check(expiry > new Date(), 'index.expiresAt must be in the future')
-    base64(index.snapshotSignature, 'index.snapshotSignature', 64)
-  }
+  check(index.publisher === 'sekaitext-official', 'index.publisher is invalid')
+  check(/^[A-Za-z0-9._-]{1,64}$/.test(index.keyId ?? ''), 'index.keyId is invalid')
+  check(index.signatureAlgorithm === 'ed25519', 'index.signatureAlgorithm is invalid')
+  check(Number.isSafeInteger(index.sequence) && index.sequence > 0, 'index.sequence is invalid')
+  const indexExpiry = new Date(index.expiresAt)
+  check(!Number.isNaN(indexExpiry.valueOf()) && indexExpiry.toISOString().replace('.000Z', 'Z') === index.expiresAt, 'index.expiresAt is invalid')
+  if (!allowExpired) check(indexExpiry > new Date(), 'index.expiresAt must be in the future')
+  base64(index.snapshotSignature, 'index.snapshotSignature', 64)
   for (const entry of index.plugins) {
     check(entry.publisher === 'sekaitext-official', `${entry.id}: publisher is invalid`)
     check(/^[A-Za-z0-9._-]{1,64}$/.test(entry.keyId ?? ''), `${entry.id}: keyId is invalid`)
@@ -234,10 +228,6 @@ export function verifyExistingIndex(index, marketDir, trustMap, { allowExpired =
     const publicKey = trustedPublicKey(trustMap, entry.keyId)
     const packageSignature = base64(entry.packageSignature, `${entry.id}: packageSignature`, 64)
     check(verify(null, packagePayload(entry), publicKey, packageSignature), `${entry.id}: existing packageSignature verification failed`)
-    if (index.version === 2) {
-      check(entry.sequence == null && entry.expiresAt == null && entry.metadataSignature == null, `${entry.id}: v3 fields are forbidden in v2`)
-      continue
-    }
     check(Number.isSafeInteger(entry.sequence) && entry.sequence > 0, `${entry.id}: sequence is invalid`)
     const expiry = new Date(entry.expiresAt)
     check(!Number.isNaN(expiry.valueOf()) && expiry.toISOString().replace('.000Z', 'Z') === entry.expiresAt, `${entry.id}: expiresAt is invalid`)
@@ -251,16 +241,13 @@ export function verifyExistingIndex(index, marketDir, trustMap, { allowExpired =
       `${entry.id}: v3 signing metadata does not match the snapshot`,
     )
   }
-  if (index.version === 3) {
-    const publicKey = trustedPublicKey(trustMap, index.keyId)
-    const signature = base64(index.snapshotSignature, 'index.snapshotSignature', 64)
-    check(verify(null, snapshotPayload(index), publicKey, signature), 'index.snapshotSignature verification failed')
-  }
+  const publicKey = trustedPublicKey(trustMap, index.keyId)
+  const signature = base64(index.snapshotSignature, 'index.snapshotSignature', 64)
+  check(verify(null, snapshotPayload(index), publicKey, signature), 'index.snapshotSignature verification failed')
 }
 
 function validateAndSign(index, marketDir, privateKey, keyId, sequence, expiresAt, trustMap) {
   validatePayloads(index, marketDir)
-  index.version = 3
   index.publisher = 'sekaitext-official'
   index.keyId = keyId
   index.signatureAlgorithm = 'ed25519'

@@ -44,6 +44,29 @@ function signedMarketFixture(manifestOverrides = {}) {
   return { root, entry, trustMap, privateKey }
 }
 
+function authenticatedV3Fixture(manifestOverrides = {}) {
+  const fixture = signedMarketFixture(manifestOverrides)
+  const sequence = 10
+  const expiresAt = '2030-01-01T00:00:00Z'
+  Object.assign(fixture.entry, { sequence, expiresAt })
+  fixture.entry.metadataSignature = sign(
+    null,
+    metadataPayload(fixture.entry),
+    fixture.privateKey,
+  ).toString('base64')
+  const index = {
+    version: 3,
+    plugins: [fixture.entry],
+    publisher: 'sekaitext-official',
+    keyId: 'test-key',
+    signatureAlgorithm: 'ed25519',
+    sequence,
+    expiresAt,
+  }
+  index.snapshotSignature = sign(null, snapshotPayload(index), fixture.privateKey).toString('base64')
+  return { ...fixture, index }
+}
+
 test('stable version comparison is numeric', () => {
   assert.equal(compareStableVersions('10.0.0', '2.99.99'), 1)
   assert.equal(compareStableVersions('1.2.3', '1.2.3'), 0)
@@ -69,23 +92,34 @@ test('publication rejects downgrade and equal-version byte replacement', () => {
   )
 })
 
-test('publisher refuses to bless a market entry whose prior signature is invalid', () => {
+test('publisher rejects v2 input without mutating it', () => {
   const { root, entry, trustMap } = signedMarketFixture()
-  assert.doesNotThrow(() => verifyExistingIndex({ version: 2, plugins: [entry] }, root, trustMap))
+  const index = { version: 2, plugins: [entry] }
+  const before = structuredClone(index)
+  assert.throws(
+    () => verifyExistingIndex(index, root, trustMap),
+    /authenticated v3 market snapshot/,
+  )
+  assert.deepEqual(index, before)
+})
+
+test('publisher accepts authentic v3 input and rejects an invalid prior package signature', () => {
+  const { root, index, entry, trustMap } = authenticatedV3Fixture()
+  assert.doesNotThrow(() => verifyExistingIndex(index, root, trustMap))
   entry.packageSignature = Buffer.alloc(64).toString('base64')
   assert.throws(
-    () => verifyExistingIndex({ version: 2, plugins: [entry] }, root, trustMap),
+    () => verifyExistingIndex(index, root, trustMap),
     /existing packageSignature verification failed/,
   )
 })
 
 test('publisher enforces display limits in UTF-8 bytes', () => {
-  const valid = signedMarketFixture({ name: `${'界'.repeat(66)}aa` })
-  assert.doesNotThrow(() => verifyExistingIndex({ version: 2, plugins: [valid.entry] }, valid.root, valid.trustMap))
+  const valid = authenticatedV3Fixture({ name: `${'界'.repeat(66)}aa` })
+  assert.doesNotThrow(() => verifyExistingIndex(valid.index, valid.root, valid.trustMap))
 
-  const invalid = signedMarketFixture({ name: '界'.repeat(67) })
+  const invalid = authenticatedV3Fixture({ name: '界'.repeat(67) })
   assert.throws(
-    () => verifyExistingIndex({ version: 2, plugins: [invalid.entry] }, invalid.root, invalid.trustMap),
+    () => verifyExistingIndex(invalid.index, invalid.root, invalid.trustMap),
     /name is invalid/,
   )
 })

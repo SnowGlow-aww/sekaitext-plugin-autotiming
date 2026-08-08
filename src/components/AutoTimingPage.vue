@@ -5,6 +5,7 @@ import { ref, shallowRef, computed, nextTick, onMounted, onUnmounted, onActivate
 import { toast, pickFile, pickSave, goHome } from '../host'
 import { FALLBACK_ENCODERS, FALLBACK_DEFAULT_ENCODER, encoderLabel } from '../constants'
 import { api, post, type EngineLine, type LinesPayload } from '../engine'
+import { createSingleFlightPoll } from '../polling'
 import LineRow from './LineRow.vue'
 // 内置团队样式模板：随插件分发，导出时整段直传后端 —— 开箱即用，无需人手一份文件。
 import BUILTIN_STYLE_TEMPLATE from '../assets/team-style-template.ass?raw'
@@ -84,6 +85,14 @@ const timingTasks = ref<TaskSnap[]>([])
 const suppressTasks = ref<TaskSnap[]>([])
 let tasksTimer: any = null
 let tasksAdopted = false // 首次快照时把后端仍存活的任务找回（插件重载/页面重建后）
+let pageActive = false
+let lifecycleGeneration = 0
+let engineStatusGeneration = 0
+let encoderProbeGeneration = 0
+let timingStartGeneration = 0
+let suppressStartGeneration = 0
+let timingActivationGeneration = 0
+let suppressActivationGeneration = 0
 
 function baseName(p?: string) {
   return (p || '').split(/[\\/]/).pop() || ''
@@ -115,8 +124,10 @@ function noteTaskTransitions(tasks: TaskSnap[], kind: 'timing' | 'suppress') {
   }
 }
 async function pollTasks() {
+  const generation = lifecycleGeneration
   try {
     const r = await api('/engine/tasks')
+    if (!pageActive || generation !== lifecycleGeneration) return
     timingTasks.value = r.timing || []
     suppressTasks.value = r.suppress || []
     noteTaskTransitions(timingTasks.value, 'timing')
@@ -135,6 +146,7 @@ async function pollTasks() {
       }
     }
   } catch (e: any) {
+    if (!pageActive || generation !== lifecycleGeneration) return
     if (e && e.status === 404) {
       hostNoTasks.value = true
       if (tasksTimer) { clearInterval(tasksTimer); tasksTimer = null }
@@ -142,7 +154,7 @@ async function pollTasks() {
   }
 }
 function startTasksPoll() {
-  if (tasksTimer || hostNoTasks.value) return
+  if (!pageActive || tasksTimer || hostNoTasks.value) return
   tasksTimer = setInterval(pollTasks, 2000)
   void pollTasks()
 }
@@ -154,6 +166,7 @@ async function closeTask(id: string) {
   try { await post('/engine/timing/close?task=' + id) } catch { /* ignore */ }
   if (id === timingTaskId.value) {
     // 关闭的是当前查看的任务：清空右列详情
+    timingActivationGeneration++
     stopTimingPolls()
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
     timingTaskId.value = ''
@@ -167,6 +180,10 @@ async function closeTask(id: string) {
 // 直接读 /progress 填充状态（不走 pollTiming，免得切到终态任务时误弹完成/失败 toast）。
 async function activateTimingTask(id: string) {
   if (!id || timingTaskId.value === id) return
+  const activation = ++timingActivationGeneration
+  const lifecycle = lifecycleGeneration
+  const isCurrentActivation = () => pageActive && lifecycle === lifecycleGeneration
+    && activation === timingActivationGeneration && timingTaskId.value === id
   stopTimingPolls()
   if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
   const snap = timingTasks.value.find((t) => t.taskId === id)
@@ -176,8 +193,8 @@ async function activateTimingTask(id: string) {
   lines.value = []; linesFps.value = 0; expandedKey.value = ''
   exportedAss.value = ''; syncScriptPath.value = ''; aegisubMacroPath.value = ''; syncStatus.value = null
   const p = await api('/engine/timing/progress?task=' + id).catch(() => null)
-  // 等待响应期间又切了查看的任务：丢弃，防止旧任务进度/终态盖到新任务视图上
-  if (timingTaskId.value !== id) return
+  // 等待响应期间切换任务、离开页面或启动了新任务：旧响应不得重挂轮询。
+  if (!isCurrentActivation()) return
   if (!p) { timingStatus.value = snap?.status || ''; return }
   timingStatus.value = p.status
   timingPercent.value = p.percent || 0
@@ -186,16 +203,17 @@ async function activateTimingTask(id: string) {
   matchedDialog.value = p.matchedDialog || 0; matchedBanner.value = p.matchedBanner || 0; matchedMarker.value = p.matchedMarker || 0
   if (p.status === 'running') {
     timingDoneHandled = false
+    stopTimingPolls()
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
     if (!hostTooOld.value) linesTimer = setInterval(loadLines, 2000)
   } else if (p.status === 'done') {
     await loadLines()
-    if (timingTaskId.value !== id) return
+    if (!isCurrentActivation()) return
     // 恢复导出/同步状态（导出过的任务重新挂上自动回读）
     try {
       const s = await api('/engine/timing/sync/status?task=' + id)
-      if (timingTaskId.value !== id) return
+      if (!isCurrentActivation()) return
       if (s.exported) {
         exportedAss.value = s.assPath
         syncStatus.value = s
@@ -208,7 +226,11 @@ async function activateTimingTask(id: string) {
 }
 async function activateSuppressTask(id: string) {
   if (!id || suppressTaskId.value === id) return
-  resetSuppress()
+  const activation = ++suppressActivationGeneration
+  const lifecycle = lifecycleGeneration
+  const isCurrentActivation = () => pageActive && lifecycle === lifecycleGeneration
+    && activation === suppressActivationGeneration && suppressTaskId.value === id
+  resetSuppress(false)
   suppressTaskId.value = id
   const snap = suppressTasks.value.find((t) => t.taskId === id)
   if (snap && snap.status !== 'running') {
@@ -220,9 +242,12 @@ async function activateSuppressTask(id: string) {
     return
   }
   await pollSuppress()
-  // 等待响应期间又切了查看的任务：丢弃，别给旧任务挂轮询/抓日志
-  if (suppressTaskId.value !== id) return
-  if (suppressStatus.value === 'running' && !suppressTimer) suppressTimer = setInterval(pollSuppress, 500)
+  // 等待响应期间切换任务或离开页面：丢弃，别给旧任务重挂轮询/抓日志。
+  if (!isCurrentActivation()) return
+  if (suppressStatus.value === 'running') {
+    stopSuppressPoll()
+    suppressTimer = setInterval(pollSuppress, 500)
+  }
   if (suppressLogOpen.value) void fetchSuppressLog()
   syncSuppressLogTimer()
 }
@@ -547,8 +572,13 @@ const failedEncoderText = computed(() =>
 let encodersProbed = false
 async function probeEncoders() {
   if (encodersProbed) return
+  const request = ++encoderProbeGeneration
+  const lifecycle = lifecycleGeneration
+  const isCurrentProbe = () => pageActive && lifecycle === lifecycleGeneration
+    && request === encoderProbeGeneration
   try {
     const p = await api('/engine/suppress/probe')
+    if (!isCurrentProbe()) return
     if (!Array.isArray(p.encoders) || !p.encoders.length) return // 老内核（<2.1.0）没这字段，维持兜底
     encodersProbed = true
     encoderOptions.value = p.encoders
@@ -608,8 +638,13 @@ async function browseAssDir() {
 }
 
 async function refreshEngineStatus() {
+  const request = ++engineStatusGeneration
+  const lifecycle = lifecycleGeneration
+  const isCurrentStatus = () => pageActive && lifecycle === lifecycleGeneration
+    && request === engineStatusGeneration
   try {
     const s = await api('/engine/status')
+    if (!isCurrentStatus()) return
     engineAvailable.value = !!s.available
     engineReady.value = !!s.ready
     engineError.value = s.error || ''
@@ -617,14 +652,16 @@ async function refreshEngineStatus() {
     // 内核在位就探测本机可用编码器（结果后端缓存，只有首次真的跑试编码）
     if (engineAvailable.value) void probeEncoders()
   } catch (e: any) {
+    if (!isCurrentStatus()) return
     engineAvailable.value = false
     engineReady.value = false
     engineError.value = (e && e.message) || ''
   } finally {
-    statusChecked.value = true
+    if (isCurrentStatus()) statusChecked.value = true
   }
 }
 onMounted(() => {
+  pageActive = true
   refreshEngineStatus()
   startTasksPoll() // 任务快照：并行任务列表 + 页面重建后找回后端仍存活的任务
 })
@@ -635,6 +672,7 @@ onUnmounted(() => clearAllTimers())
 // resume if a run is still in flight when we return.
 onDeactivated(() => clearAllTimers())
 onActivated(() => {
+  pageActive = true
   // Re-probe engine readiness on return: this page is kept-alive so onMounted won't
   // re-run; without this a transient first-probe failure left the buttons stuck disabled.
   refreshEngineStatus()
@@ -651,6 +689,16 @@ onActivated(() => {
   syncSuppressLogTimer()
 })
 function clearAllTimers() {
+  pageActive = false
+  lifecycleGeneration++
+  engineStatusGeneration++
+  encoderProbeGeneration++
+  timingStartGeneration++
+  suppressStartGeneration++
+  timingActivationGeneration++
+  suppressActivationGeneration++
+  timingPoll.invalidate()
+  suppressPoll.invalidate()
   for (const t of [timingTimer, previewTimer, linesTimer, suppressTimer, syncTimer, tasksTimer, suppressLogTimer]) if (t) clearInterval(t)
   timingTimer = previewTimer = linesTimer = suppressTimer = syncTimer = tasksTimer = suppressLogTimer = null
   if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
@@ -668,6 +716,8 @@ async function startTiming() {
   if (!videoPath.value || !scriptPath.value) { toast('请先填写视频和剧本 JSON 路径', 'warn'); return }
   const parallel = parallelEnabled.value && !hostNoTasks.value
   if (timingRunning.value && !parallel) return
+  const startGeneration = ++timingStartGeneration
+  const lifecycle = lifecycleGeneration
   resetTiming(parallel)    // also clears any leftover poll timers (see resetTiming)
   timingStatus.value = 'running' // disable button synchronously before awaiting
   try {
@@ -680,17 +730,24 @@ async function startTiming() {
       threshold: thresholdPayload(),
       parallel,
     })
+    if (!pageActive || lifecycle !== lifecycleGeneration
+        || startGeneration !== timingStartGeneration) return
+    ++timingActivationGeneration
+    stopTimingPolls()
     timingTaskId.value = r.taskId
     timingTimer = setInterval(pollTiming, 500)
     previewTimer = setInterval(pollPreview, 500)
     linesTimer = setInterval(loadLines, 2000)
     void pollTasks()
   } catch (e: any) {
+    if (!pageActive || lifecycle !== lifecycleGeneration
+        || startGeneration !== timingStartGeneration) return
     timingStatus.value = '' // re-enable button so the user can retry
     toast('启动打轴失败: ' + e.message, 'error')
   }
 }
 function resetTiming(keepSuppressInputs = false) {
+  timingActivationGeneration++
   stopTimingPolls()
   if (syncTimer) { clearInterval(syncTimer); syncTimer = null }
   timingDoneHandled = false
@@ -709,19 +766,21 @@ function resetTiming(keepSuppressInputs = false) {
   }
 }
 function stopTimingPolls() {
+  timingPoll.invalidate()
   if (timingTimer) clearInterval(timingTimer)
   if (previewTimer) clearInterval(previewTimer)
   if (linesTimer) clearInterval(linesTimer)
   timingTimer = previewTimer = linesTimer = null
   if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null }
 }
-async function pollTiming() {
+const timingPoll = createSingleFlightPoll(async ({ isCurrent }) => {
   const id = timingTaskId.value
   if (!id) return
   try {
     const p = await api('/engine/timing/progress?task=' + id)
-    // 等待响应期间切换了查看的任务：丢弃，防止旧任务的数据/终态 toast 盖到新任务头上
-    if (timingTaskId.value !== id) return
+    // 同一任务每次只允许一个进度请求在途；切换/停止会失效旧代次，防止较早的
+    // running 响应在较新的 done/error 之后回写，把终态覆盖回运行中。
+    if (!isCurrent() || timingTaskId.value !== id) return
     timingStatus.value = p.status
     timingPercent.value = p.percent || 0
     timingFps.value = p.fps || 0
@@ -732,10 +791,13 @@ async function pollTiming() {
     matchedDialog.value = p.matchedDialog || 0
     matchedBanner.value = p.matchedBanner || 0
     matchedMarker.value = p.matchedMarker || 0
-    if (p.status === 'done') onTimingDone()
+    if (p.status === 'done') void onTimingDone()
     else if (p.status === 'error') { stopTimingPolls(); toast('打轴失败: ' + (p.error || ''), 'error') }
     else if (p.status === 'canceled') { stopTimingPolls() }
   } catch { /* transient; keep polling */ }
+})
+function pollTiming() {
+  return timingPoll.run()
 }
 async function pollPreview() {
   const id = timingTaskId.value
@@ -748,10 +810,20 @@ async function pollPreview() {
 }
 async function onTimingDone() {
   if (timingDoneHandled) return // guard against overlapping polls firing this twice
+  const id = timingTaskId.value
+  if (!id) return
+  const activation = timingActivationGeneration
+  const lifecycle = lifecycleGeneration
+  const isCurrentCompletion = () => pageActive && lifecycle === lifecycleGeneration
+    && activation === timingActivationGeneration && timingTaskId.value === id
   timingDoneHandled = true
   stopTimingPolls()
   timingPercent.value = 100
   await loadLines() // 完成后引擎会补好每行的默认分隔帧（与导出同源的估算）
+  // Loading the final line list can outlive this page activation or the viewed
+  // task. Never let that stale continuation filter/expand a newer task or toast
+  // completion after the user has already left this page.
+  if (!isCurrentCompletion()) return
   // 首次完成时把「过长行」直接推到眼前：新人常不知道过长行可逐句调分句——分句编辑器默认折叠、
   // 过长行又混在几十句里不显眼（用户反馈：第一次用不知道能在哪调，直接导出了）。有过长行就自动
   // 打开「仅显示过长行」筛选 + 展开第一条的分句编辑器，并给一条说明性提示。此逻辑只在**新完成**时
@@ -781,6 +853,8 @@ async function startSuppress() {
   if (!sourceVideo.value || !outputPath.value) { toast('请填写源视频和输出路径', 'warn'); return }
   const parallel = parallelEnabled.value && !hostNoTasks.value
   if (suppressRunning.value && !parallel) return
+  const startGeneration = ++suppressStartGeneration
+  const lifecycle = lifecycleGeneration
   resetSuppress()              // also clears any leftover poll timer (see resetSuppress)
   suppressStatus.value = 'running' // disable button synchronously before awaiting
   // keep CRF 0 (lossless) intact; only fall back to 21 on empty/invalid input
@@ -795,15 +869,22 @@ async function startSuppress() {
       useHwAccelDecode: useHwAccelDecode.value,
       parallel,
     })
+    if (!pageActive || lifecycle !== lifecycleGeneration
+        || startGeneration !== suppressStartGeneration) return
+    ++suppressActivationGeneration
+    stopSuppressPoll()
     suppressTaskId.value = r.taskId
     suppressTimer = setInterval(pollSuppress, 500)
     void pollTasks()
   } catch (e: any) {
+    if (!pageActive || lifecycle !== lifecycleGeneration
+        || startGeneration !== suppressStartGeneration) return
     suppressStatus.value = '' // re-enable button so the user can retry
     toast('启动压制失败: ' + e.message, 'error')
   }
 }
-function resetSuppress() {
+function resetSuppress(invalidateActivation = true) {
+  if (invalidateActivation) suppressActivationGeneration++
   stopSuppressPoll()
   suppressPercent.value = 0; suppressFrame.value = 0; suppressTotal.value = 0
   suppressFps.value = 0; suppressLog.value = ''
@@ -857,14 +938,14 @@ watch([suppressLogOpen, suppressRunning], () => {
   if (suppressLogOpen.value) void fetchSuppressLog()
   syncSuppressLogTimer()
 })
-async function pollSuppress() {
+const suppressPoll = createSingleFlightPoll(async ({ isCurrent }) => {
   const id = suppressTaskId.value
   if (!id) return
   try {
     const p = await api('/engine/suppress/progress?task=' + id)
-    // 等待响应期间切换/新建了任务：丢弃旧任务的响应——并行模式下这会把上一个
-    // 任务的百分比/终态写进新任务的显示（进度条来回跳 + 误弹完成/失败 toast）
-    if (suppressTaskId.value !== id) return
+    // 同一任务每次只允许一个进度请求在途；切换/停止会失效旧代次，防止较早的
+    // running 响应在较新的 done/error 之后回写进度并重复终态提示。
+    if (!isCurrent() || suppressTaskId.value !== id) return
     suppressStatus.value = p.status
     suppressPercent.value = p.percent || 0
     suppressFrame.value = p.frame || 0
@@ -880,8 +961,12 @@ async function pollSuppress() {
     }
     else if (p.status === 'canceled') { stopSuppressPoll() }
   } catch { /* ignore */ }
+})
+function pollSuppress() {
+  return suppressPoll.run()
 }
 function stopSuppressPoll() {
+  suppressPoll.invalidate()
   if (suppressTimer) clearInterval(suppressTimer)
   suppressTimer = null
 }

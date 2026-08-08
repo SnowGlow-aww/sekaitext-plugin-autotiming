@@ -1,11 +1,15 @@
 {
   "name": "sekaitext-plugin-autotiming",
-  "version": "3.2.7",
+  "version": "3.2.8",
   "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "build": "vite build",
     "pack": "node pack.mjs",
-    "dist": "vite build && node pack.mjs"
+    "dist": "vite build && node pack.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.6",
