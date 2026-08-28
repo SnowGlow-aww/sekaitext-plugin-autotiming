@@ -363,7 +363,6 @@ function scheduleAutosave() {
         outputDir: assOutputDir.value,
         clean: cleanExport.value,
         syncTags: exportSyncTags.value,
-        speakerColor: speakerColorExport.value,
         styleTemplate: styleTemplate.value,
         styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
       })
@@ -374,18 +373,15 @@ function scheduleAutosave() {
 // --- 导出与 Aegisub 同步 ---
 const CLEAN_KEY = 'autotiming:cleanExport'
 const SYNC_KEY = 'autotiming:syncTags'
-const SPEAKER_COLOR_KEY = 'autotiming:speakerColor'
 const TMPL_KEY = 'autotiming:styleTemplate'
 const AEGISUB_DIR_KEY = 'autotiming:aegisubDir'
 const cleanExport = ref(localStorage.getItem(CLEAN_KEY) !== '0')
 const exportSyncTags = ref(localStorage.getItem(SYNC_KEY) !== '0')
-const speakerColorExport = ref(localStorage.getItem(SPEAKER_COLOR_KEY) === '1')
 const styleTemplate = ref(localStorage.getItem(TMPL_KEY) || '')
 // Aegisub automation/autoload 目录：便携版/自定义安装位置自动探测不到，手动指一次
 const aegisubDir = ref(localStorage.getItem(AEGISUB_DIR_KEY) || '')
 watch(cleanExport, (v) => { try { localStorage.setItem(CLEAN_KEY, v ? '1' : '0') } catch { /* ignore */ } })
 watch(exportSyncTags, (v) => { try { localStorage.setItem(SYNC_KEY, v ? '1' : '0') } catch { /* ignore */ } })
-watch(speakerColorExport, (v) => { try { localStorage.setItem(SPEAKER_COLOR_KEY, v ? '1' : '0') } catch { /* ignore */ } })
 watch(styleTemplate, (v) => { try { localStorage.setItem(TMPL_KEY, v) } catch { /* ignore */ } })
 watch(aegisubDir, (v) => { try { localStorage.setItem(AEGISUB_DIR_KEY, v) } catch { /* ignore */ } })
 const showExportOpts = ref(false)
@@ -552,7 +548,6 @@ async function exportAss() {
       outputDir: assOutputDir.value,
       clean: cleanExport.value,
       syncTags: exportSyncTags.value,
-      speakerColor: speakerColorExport.value,
       styleTemplate: styleTemplate.value,
       // 未指定自定义模板时用内置团队模板（路径优先于内容，后端同口径）
       styleTemplateContent: styleTemplate.value ? '' : BUILTIN_STYLE_TEMPLATE,
@@ -807,6 +802,10 @@ async function refreshEngineStatus() {
   }
 }
 onMounted(() => {
+  try {
+    localStorage.removeItem('autotiming:speakerColor')
+    localStorage.removeItem('autotiming:internalUnlocked')
+  } catch { /* ignore */ }
   pageActive = true
   refreshEngineStatus()
   startTasksPoll() // 任务快照：并行任务列表 + 页面重建后找回后端仍存活的任务
@@ -1373,15 +1372,6 @@ async function closeSuppressTask(id: string) {
                   </svg>
                 </span>
                 <span class="app-label">写入 Aegisub 同步标识（在每行 Effect 字段埋 st:行号 作为对应标记，双向同步必需）</span>
-              </label>
-              <label class="flex items-center gap-2 cursor-pointer w-fit">
-                <input type="checkbox" class="option-check-input" v-model="speakerColorExport" />
-                <span class="option-check-box" aria-hidden="true">
-                  <svg viewBox="0 0 16 16" fill="none">
-                    <path d="m3.75 8.25 2.65 2.6 5.85-6" />
-                  </svg>
-                </span>
-                <span class="app-label">角色代表色描边（26 位主要角色按官方代表色写入 \3c 描边，其他角色/NPC 保持默认样式）</span>
               </label>
               <label class="block">
                 <span class="app-label">团队样式模板（默认用内置 {{ BUILTIN_STYLE_TEMPLATE_NAME }}，选文件可覆盖）</span>
