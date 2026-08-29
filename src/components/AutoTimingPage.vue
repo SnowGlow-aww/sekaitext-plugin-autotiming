@@ -1264,7 +1264,7 @@ async function closeSuppressTask(id: string) {
               <span class="app-label">并行任务模式（同时打轴/压制多个视频）</span>
             </label>
             <p v-if="parallelEnabled" class="app-help text-warning mt-1">
-              ⚠ 每个并行任务独占一个识别/编码内核进程，CPU 与内存开销成倍增长——性能不高的电脑慎用；完成的任务请及时点 ✕ 关闭以释放内存（同类任务最多并行 4 个）。
+              ⚠ 每个并行任务独占一个识别/编码内核进程，CPU 与内存开销成倍增长——性能不高的电脑慎用；完成的任务请及时点 ✕ 关闭以释放内存。
             </p>
           </div>
 
