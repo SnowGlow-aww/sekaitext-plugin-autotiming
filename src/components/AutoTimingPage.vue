@@ -1362,7 +1362,7 @@ async function closeSuppressTask(id: string) {
                     <path d="m3.75 8.25 2.65 2.6 5.85-6" />
                   </svg>
                 </span>
-                <span class="app-label">成品清理（样式按原文行数改 1行/2行/3行、删角色名与调试行；\N 保留）</span>
+                <span class="app-label">成品清理（样式按原文行数改 1行/2行/3行、删角色名与调试行；两行台词拆到 1行/2行 槽位）</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer w-fit">
                 <input type="checkbox" class="option-check-input" v-model="exportSyncTags" />
