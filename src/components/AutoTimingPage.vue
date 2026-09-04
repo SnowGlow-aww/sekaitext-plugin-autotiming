@@ -99,6 +99,7 @@ function baseName(p?: string) {
 }
 function taskStatusLabel(t: TaskSnap) {
   if (t.status === 'running') return (t.percent || 0).toFixed(0) + '%'
+  if (t.status === 'waiting' || t.status === 'queued') return '排队中'
   if (t.status === 'done') return '完成'
   if (t.status === 'error') return '失败'
   if (t.status === 'canceled') return '已取消'
@@ -727,9 +728,14 @@ async function probeEncoders() {
     encoderFailures.value = p.encoderFailures && typeof p.encoderFailures === 'object' ? p.encoderFailures : {}
     const fc = p.fontCheck
     fontCheckWarn.value = fc && (fc.status === 'slow' || fc.status === 'hung') ? String(fc.message || '') : ''
-    // 当前选择（含历史持久化值，比如换过机器/显卡）不在本机可用列表 → 换成推荐项
+    // 当前选择（含历史持久化值，比如换过机器/显卡）不在本机可用列表，
+    // 或用户历史上停留在老版本 Libx264 默认兜底且本机探测到推荐的 HEVC 硬编时 → 自动对齐推荐项
+    const userSaved = localStorage.getItem(ENCODER_KEY)
+    const isLegacyH264Default = !userSaved || userSaved === 'Libx264'
     if (!p.encoders.includes(encoder.value)) {
       encoder.value = p.recommended && p.encoders.includes(p.recommended) ? p.recommended : p.encoders[0]
+    } else if (isLegacyH264Default && p.recommended && p.recommended.startsWith('Hevc') && p.encoders.includes(p.recommended)) {
+      encoder.value = p.recommended
     }
   } catch { /* 老宿主 404 / 引擎忙：维持兜底列表，下次进入页面再试 */ }
 }
@@ -801,23 +807,43 @@ async function refreshEngineStatus() {
     if (isCurrentStatus()) statusChecked.value = true
   }
 }
+function onPreventBackspace(e: KeyboardEvent) {
+  if (e.key === 'Backspace') {
+    const ae = document.activeElement
+    const isInput = ae instanceof HTMLElement && (
+      ae.tagName === 'INPUT' ||
+      ae.tagName === 'TEXTAREA' ||
+      ae.isContentEditable
+    )
+    if (!isInput) e.preventDefault()
+  }
+}
+
 onMounted(() => {
   try {
     localStorage.removeItem('autotiming:speakerColor')
     localStorage.removeItem('autotiming:internalUnlocked')
   } catch { /* ignore */ }
   pageActive = true
+  window.addEventListener('keydown', onPreventBackspace)
   refreshEngineStatus()
   startTasksPoll() // 任务快照：并行任务列表 + 页面重建后找回后端仍存活的任务
 })
 
-onUnmounted(() => clearAllTimers())
+onUnmounted(() => {
+  window.removeEventListener('keydown', onPreventBackspace)
+  clearAllTimers()
+})
 // The host wraps plugin routes in <keep-alive>, so navigating back to the editor
 // DEACTIVATES (does not unmount) this page — stop polling while hidden, and
 // resume if a run is still in flight when we return.
-onDeactivated(() => clearAllTimers())
+onDeactivated(() => {
+  window.removeEventListener('keydown', onPreventBackspace)
+  clearAllTimers()
+})
 onActivated(() => {
   pageActive = true
+  window.addEventListener('keydown', onPreventBackspace)
   // Re-probe engine readiness on return: this page is kept-alive so onMounted won't
   // re-run; without this a transient first-probe failure left the buttons stuck disabled.
   refreshEngineStatus()
@@ -1285,15 +1311,16 @@ async function closeSuppressTask(id: string) {
             >
               <span class="truncate flex-1">{{ baseName(t.videoPath) || t.taskId }}</span>
               <span class="app-help shrink-0">{{ taskStatusLabel(t) }}<template v-if="t.dialogTotal"> · {{ t.matchedDialog }}/{{ t.dialogTotal }}</template></span>
-              <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelTask(t.taskId)">取消</button>
+              <button v-if="t.status === 'running' || t.status === 'waiting' || t.status === 'queued'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelTask(t.taskId)">取消</button>
               <button class="btn btn-xs btn-ghost shrink-0" title="关闭任务并释放其内核进程" @click.stop="closeTask(t.taskId)">✕</button>
             </div>
           </div>
 
           <div v-if="timingStatus">
-            <progress class="progress progress-primary w-full" :value="timingPercent" max="100"></progress>
+            <progress class="progress progress-primary w-full" :value="timingStatus === 'waiting' ? undefined : timingPercent" max="100"></progress>
             <div class="app-help mt-1">
-              {{ timingStatus }} · {{ timingPercent.toFixed(1) }}% · fps {{ timingFps }} · 剩余 {{ timingEta }} · 对话 {{ matchedDialog }}/{{ dialogTotal }}<template v-if="bannerTotal"> · banner {{ matchedBanner }}/{{ bannerTotal }}</template><template v-if="markerTotal"> · marker {{ matchedMarker }}/{{ markerTotal }}</template>
+              <span v-if="timingStatus === 'waiting'" class="text-warning">排队中 · 等待内核进程释放</span>
+              <template v-else>{{ timingStatus }} · {{ timingPercent.toFixed(1) }}% · fps {{ timingFps }} · 剩余 {{ timingEta }} · 对话 {{ matchedDialog }}/{{ dialogTotal }}<template v-if="bannerTotal"> · banner {{ matchedBanner }}/{{ bannerTotal }}</template><template v-if="markerTotal"> · marker {{ matchedMarker }}/{{ markerTotal }}</template></template>
             </div>
           </div>
           <img v-if="previewSrc" :src="previewSrc" class="rounded-[var(--radius-control)] border border-[var(--color-border)] w-full" />
@@ -1391,16 +1418,18 @@ async function closeSuppressTask(id: string) {
               <div class="pt-2 border-t border-[var(--color-border)] space-y-2">
                 <span class="app-label">staff 制作人员行（随导出写入 ass 顶部 0:00~0:05；未勾选不输出，勾选但留空输出默认职位项，填写后输出自定义内容）</span>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <label v-for="field in STAFF_UI_FIELDS" :key="field.key" class="flex items-center gap-2">
-                    <input v-model="staff.enabled[field.key]" type="checkbox" class="checkbox checkbox-sm shrink-0" />
-                    <span class="app-help w-16 shrink-0">{{ field.label }}</span>
+                  <div v-for="field in STAFF_UI_FIELDS" :key="field.key" class="flex items-center gap-2">
+                    <label class="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
+                      <input v-model="staff.enabled[field.key]" type="checkbox" class="checkbox checkbox-sm shrink-0" />
+                      <span class="app-help w-16 shrink-0">{{ field.label }}</span>
+                    </label>
                     <input
                       v-model="staff[field.key]"
                       class="app-input min-w-0 flex-1"
                       :disabled="!staff.enabled[field.key]"
                       :placeholder="field.placeholder"
                     />
-                  </label>
+                  </div>
                 </div>
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="app-help shrink-0">预设</span>
@@ -1525,10 +1554,10 @@ async function closeSuppressTask(id: string) {
             <div class="flex items-center gap-2">
               <span class="truncate flex-1">{{ baseName(t.outputPath) || baseName(t.sourceVideo) || t.taskId }}</span>
               <span class="app-help shrink-0">{{ taskStatusLabel(t) }}</span>
-              <button v-if="t.status === 'running'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
+              <button v-if="t.status === 'running' || t.status === 'waiting' || t.status === 'queued'" class="btn btn-xs btn-ghost border border-[var(--color-border)] shrink-0" @click.stop="cancelSuppressTask(t.taskId)">取消</button>
               <!-- ✕ 只给终态卡片：运行中的压制必须走「取消」（suppress.stop 才会杀 ffmpeg
                    进程树），硬移除会留下孤儿 ffmpeg 继续编码，后端对 running 也拒绝(409)。 -->
-              <button v-if="t.status !== 'running'" class="btn btn-xs btn-ghost shrink-0" title="移除任务" @click.stop="closeSuppressTask(t.taskId)">✕</button>
+              <button v-if="t.status !== 'running' && t.status !== 'waiting' && t.status !== 'queued'" class="btn btn-xs btn-ghost shrink-0" title="移除任务" @click.stop="closeSuppressTask(t.taskId)">✕</button>
             </div>
             <!-- 每个并行任务自己的进度条：主进度区只跟当前查看的任务，其余任务
                  的进度在这里各自独立显示，互不串线 -->
@@ -1537,9 +1566,11 @@ async function closeSuppressTask(id: string) {
         </div>
 
         <div v-if="suppressStatus">
-          <progress class="progress progress-primary w-full" :value="suppressPercent" max="100"></progress>
+          <progress class="progress progress-primary w-full" :value="suppressStatus === 'waiting' ? undefined : suppressPercent" max="100"></progress>
           <div class="app-help mt-1">
-            <span v-if="suppressViewedName" class="font-medium">{{ suppressViewedName }} · </span>{{ suppressStatus }} · {{ suppressPercent.toFixed(1) }}% · 帧 {{ suppressFrame }}/{{ suppressTotal }} · fps {{ suppressFps.toFixed(0) }}
+            <span v-if="suppressViewedName" class="font-medium">{{ suppressViewedName }} · </span>
+            <span v-if="suppressStatus === 'waiting'" class="text-warning">排队中 · 等待硬件编码器释放</span>
+            <template v-else>{{ suppressStatus }} · {{ suppressPercent.toFixed(1) }}% · 帧 {{ suppressFrame }}/{{ suppressTotal }} · fps {{ suppressFps.toFixed(0) }}</template>
           </div>
           <code v-if="suppressLog" class="block truncate app-help" style="font-size:10px">{{ suppressLog }}</code>
         </div>

@@ -32,10 +32,9 @@ export function encoderLabel(name: string): string {
 }
 
 // 宿主还不支持 /engine/suppress/probe（app <5.7.3 / 内核 <2.1.0）时的兜底列表：
-// 只列本平台可能可用的项，默认软编保证能跑。此前默认 HevcVideoToolbox 在
-// Windows 上是 "Unknown encoder"，压制 100% 起不来。AMF 项老内核不认识，不进兜底。
+// 优先排 HEVC 硬件编码器，软编兜底优先 Libx265（匹配主流 HEVC/H.265 工作流）。
 export const FALLBACK_ENCODERS = IS_MAC
-  ? ['HevcVideoToolbox', 'H264VideoToolbox', 'Libx264', 'Libx265', 'LibSvtAv1']
-  : ['Libx264', 'Libx265', 'LibSvtAv1', 'HevcNvenc', 'H264Nvenc', 'Av1Nvenc', 'HevcQsv', 'H264Qsv', 'Av1Qsv']
+  ? ['HevcVideoToolbox', 'H264VideoToolbox', 'Libx265', 'Libx264', 'LibSvtAv1']
+  : ['HevcNvenc', 'HevcAmf', 'HevcQsv', 'Libx265', 'H264Nvenc', 'H264Amf', 'H264Qsv', 'Libx264', 'Av1Nvenc', 'Av1Qsv', 'LibSvtAv1']
 
-export const FALLBACK_DEFAULT_ENCODER = IS_MAC ? 'HevcVideoToolbox' : 'Libx264'
+export const FALLBACK_DEFAULT_ENCODER = IS_MAC ? 'HevcVideoToolbox' : 'HevcNvenc'
